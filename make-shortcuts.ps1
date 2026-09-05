@@ -52,6 +52,23 @@ foreach ($name in $names) {
     Write-Host "Created: $lnkPath" -ForegroundColor Green
 }
 
+# One extra shortcut that only shows what is currently blocked.
+# -WindowStyle Hidden keeps the console out of the way: only the window shows.
+$StatusScript = Join-Path $PSScriptRoot 'show-status.ps1'
+if (Test-Path $StatusScript) {
+    $statusLnk = Join-Path $Folder 'Status.lnk'
+    $lnk = $shell.CreateShortcut($statusLnk)
+    $lnk.TargetPath       = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $lnk.Arguments        = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StatusScript`""
+    $lnk.WorkingDirectory = $PSScriptRoot
+    $lnk.Description      = 'Show which devices are currently blocked on the router'
+    $lnk.IconLocation     = "$env:SystemRoot\System32\shell32.dll,23"
+    $lnk.Save()
+    Write-Host "Created: $statusLnk" -ForegroundColor Green
+} else {
+    Write-Host 'show-status.ps1 not found next to this script; status shortcut skipped.' -ForegroundColor DarkYellow
+}
+
 Write-Host ''
 Write-Host "Done. $($names.Count) shortcut(s) in $Folder"
 Write-Host 'The console window closes on its own; add -NoExit to Arguments if you want to read the output.'
