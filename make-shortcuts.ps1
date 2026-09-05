@@ -69,6 +69,31 @@ if (Test-Path $StatusScript) {
     Write-Host 'show-status.ps1 not found next to this script; status shortcut skipped.' -ForegroundColor DarkYellow
 }
 
+# Wi-Fi whitelist: two explicit shortcuts rather than one toggle, so it is
+# always obvious which way the switch goes. Turning it ON asks for confirmation
+# in a dialog of its own (the console is hidden, so a console prompt would be
+# invisible); turning it OFF is the safe direction and just reports the result.
+$WhitelistScript = Join-Path $PSScriptRoot 'wifi-whitelist.ps1'
+if (Test-Path $WhitelistScript) {
+    $wlShortcuts = @(
+        @{ File = 'Whitelist ON.lnk';  Arg = 'on';  Icon = 28; Desc = 'Leave Wi-Fi access to whitelisted devices only' },
+        @{ File = 'Whitelist OFF.lnk'; Arg = 'off'; Icon = 29; Desc = 'Open Wi-Fi back to every device' }
+    )
+    foreach ($s in $wlShortcuts) {
+        $p = Join-Path $Folder $s.File
+        $lnk = $shell.CreateShortcut($p)
+        $lnk.TargetPath       = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $lnk.Arguments        = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$WhitelistScript`" $($s.Arg)"
+        $lnk.WorkingDirectory = $PSScriptRoot
+        $lnk.Description      = $s.Desc
+        $lnk.IconLocation     = "$env:SystemRoot\System32\shell32.dll,$($s.Icon)"
+        $lnk.Save()
+        Write-Host "Created: $p" -ForegroundColor Green
+    }
+} else {
+    Write-Host 'wifi-whitelist.ps1 not found next to this script; whitelist shortcuts skipped.' -ForegroundColor DarkYellow
+}
+
 Write-Host ''
 Write-Host "Done. $($names.Count) shortcut(s) in $Folder"
 Write-Host 'The console window closes on its own; add -NoExit to Arguments if you want to read the output.'

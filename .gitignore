@@ -3,8 +3,9 @@
 cred.xml
 
 # Реальный список устройств с MAC-адресами домашней сети.
-# В репозитории лежит только devices.example.json.
+# В репозитории лежат только файлы-образцы *.example.json.
 devices.json
+whitelist.json
 
 # Ярлыки, создаваемые make-shortcuts.ps1
 *.lnk
