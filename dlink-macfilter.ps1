@@ -35,27 +35,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Net.Http
 
 $CONFIG_ID = 74                      # firewall MAC filter
 $StateDir  = $PSScriptRoot           # state lives next to this script
 $CredFile  = Join-Path $StateDir 'cred.xml'
 $DevFile   = Join-Path $StateDir 'devices.json'
-$Endpoint  = '/jsonrpc'
-$BaseUrl   = "http://$Router"
+
+# Authentication and config read/write live in the shared module, so the
+# protocol is implemented once for every script in this folder.
+. (Join-Path $PSScriptRoot 'router-api.ps1')
+Initialize-RouterApi -Router $Router -User $User -CredFile $CredFile
 
 # ---------------------------------------------------------------- helpers ---
-
-function Get-Md5Hex([string]$Text) {
-    $md5   = [System.Security.Cryptography.MD5]::Create()
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-    -join ($md5.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
-}
-
-function New-Cnonce {
-    $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-    -join (1..16 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
-}
 
 function Get-StoredCredential {
     if (-not (Test-Path $CredFile)) {
@@ -92,102 +83,19 @@ function Resolve-Mac {
 }
 
 # ------------------------------------------------------------- transport ---
-
-$script:Cookies = New-Object System.Net.CookieContainer
-
-function Invoke-RouterRpc {
-    # Sends one JSON-RPC call. Performs the 401 challenge/response dance on
-    # every call, so each request gets a fresh nonce and nc is always 1.
-    param([hashtable]$Payload)
-
-    $cred = Get-StoredCredential
-    $pass = $cred.GetNetworkCredential().Password
-    $body = $Payload | ConvertTo-Json -Depth 25 -Compress
-
-    $handler = New-Object System.Net.Http.HttpClientHandler
-    $handler.CookieContainer   = $script:Cookies
-    $handler.UseCookies        = $true
-    $handler.AllowAutoRedirect = $false
-    $client = New-Object System.Net.Http.HttpClient($handler)
-    $client.Timeout = [TimeSpan]::FromSeconds(20)
-
-    try {
-        # --- attempt 1: unauthenticated, expect 401 + challenge -------------
-        $content = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, 'application/json')
-        $resp    = $client.PostAsync("$BaseUrl$Endpoint", $content).GetAwaiter().GetResult()
-
-        if ([int]$resp.StatusCode -ne 401) {
-            $text = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-            return ($text | ConvertFrom-Json)
-        }
-
-        $challenge = $null
-        $hdr = $null
-        if ($resp.Headers.TryGetValues('Anweb-Authenticate', [ref]$hdr)) { $challenge = @($hdr)[0] }
-        if (-not $challenge) { throw 'Router did not return an Anweb-Authenticate challenge.' }
-
-        $realm = ([regex]'realm="([^"]+)"').Match($challenge).Groups[1].Value
-        $nonce = ([regex]'nonce="([^"]+)"').Match($challenge).Groups[1].Value
-        $qop   = ([regex]'qop="?([a-zA-Z]+)"?').Match($challenge).Groups[1].Value
-        if (-not $qop) { $qop = 'auth' }
-
-        # --- build the digest response -------------------------------------
-        $nc     = '00000001'
-        $cnonce = New-Cnonce
-        $ha1    = Get-Md5Hex "$($cred.UserName):${realm}:$pass"
-        $ha2    = Get-Md5Hex "POST:$Endpoint"
-        $rspVal = Get-Md5Hex "${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}"
-
-        $userEsc = [uri]::EscapeDataString($cred.UserName)
-        $fmt = 'Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", response="{4}", qop={5}, nc={6}, cnonce="{7}"'
-        $authHeader = $fmt -f $userEsc, $realm, $nonce, $Endpoint, $rspVal, $qop, $nc, $cnonce
-
-        # --- attempt 2: authenticated --------------------------------------
-        $content2 = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, 'application/json')
-        $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, "$BaseUrl$Endpoint")
-        $req.Content = $content2
-        # The web UI reads the challenge from "anweb-authenticate" but sends the
-        # response back in the standard Authorization header, plus a marker that
-        # this is a retry after a 401.
-        $req.Headers.TryAddWithoutValidation('Authorization', $authHeader) | Out-Null
-        $req.Headers.TryAddWithoutValidation('anweb-repeat-request', 'true') | Out-Null
-        $resp2 = $client.SendAsync($req).GetAwaiter().GetResult()
-        $text2 = $resp2.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-
-        if ([int]$resp2.StatusCode -eq 401) {
-            $remain = $null
-            $left   = 'unknown'
-            if ($resp2.Headers.TryGetValues('Anweb-Auth-Try-Count-Remain', [ref]$remain)) { $left = @($remain)[0] }
-            throw ("Authentication rejected by the router (attempts left before a temporary ban: $left). " +
-                   "Most likely the stored password is wrong -- delete $CredFile and run 'setup' again.")
-        }
-        if (-not $text2) { throw "Empty response from router (HTTP $([int]$resp2.StatusCode))." }
-
-        return ($text2 | ConvertFrom-Json)
-    }
-    finally {
-        $client.Dispose()
-    }
-}
+# The digest handshake itself lives in router-api.ps1; these two wrappers
+# only know which configuration holds the firewall MAC filter.
 
 function Read-MacFilter {
-    $r = Invoke-RouterRpc @{ jsonrpc = '2.0'; method = 'read'; params = @{ id = $CONFIG_ID }; id = 1 }
-    if ($r.error) { throw "read failed: $($r.error | ConvertTo-Json -Compress)" }
-    $mf = $r.result.data.macfilter
+    $data = Read-RouterConfig -Id $CONFIG_ID
+    $mf = $data.macfilter
     if ($null -eq $mf) { throw 'Response contained no macfilter section. Run "dump" and inspect the output.' }
     return @($mf)
 }
 
 function Write-MacRule {
     param($Rule, [int]$Pos)
-    $r = Invoke-RouterRpc @{
-        jsonrpc = '2.0'
-        method  = 'write'
-        params  = @{ id = $CONFIG_ID; pos = $Pos; data = $Rule; save = $true }
-        id      = 2
-    }
-    if ($r.error) { throw "write failed: $($r.error | ConvertTo-Json -Compress)" }
-    return $r
+    return (Write-RouterConfig -Id $CONFIG_ID -Data $Rule -Pos $Pos)
 }
 
 # ------------------------------------------------------------------ logic ---
@@ -320,6 +228,10 @@ function Set-Block {
 }
 
 # ---------------------------------------------------------------- actions ---
+
+# The shared module only reads cred.xml; creating it on first use stays here,
+# so any action still asks for the password once instead of failing.
+Get-StoredCredential | Out-Null
 
 switch ($Action) {
 
