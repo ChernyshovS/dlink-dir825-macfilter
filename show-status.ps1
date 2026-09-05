@@ -26,8 +26,32 @@ $ErrorActionPreference = 'Stop'
 
 $MainScript = Join-Path $PSScriptRoot 'dlink-macfilter.ps1'
 $DevFile    = Join-Path $PSScriptRoot 'devices.json'
+$CredFile   = Join-Path $PSScriptRoot 'cred.xml'
 
 if (-not (Test-Path $MainScript)) { throw "Рядом со скриптом не найден dlink-macfilter.ps1 ($PSScriptRoot)." }
+
+. (Join-Path $PSScriptRoot 'router-api.ps1')
+Initialize-RouterApi -Router $Router -User $User -CredFile $CredFile
+
+$CFG_CURSOR = 39
+$CFG_FILTER = 42
+
+function Get-WifiWhitelistState {
+    <#  Белый список Wi-Fi живёт в конфигурации 42, отдельно от поштучных
+        блокировок. Читаем обе полосы и сводим к одной строке состояния. #>
+    $on = @()
+    $total = 0
+    foreach ($b in @(@{ P = '';    T = '2.4 ГГц' }, @{ P = '5G_'; T = '5 ГГц' })) {
+        Write-RouterConfig -Id $CFG_CURSOR -Data @{ "$($b.P)mbssidCur" = 1 } -Save $false | Out-Null
+        $d = Read-RouterConfig -Id $CFG_FILTER
+        if ([int]$d."$($b.P)AccessPolicy" -eq 1) { $on += $b.T }
+        $listObj = $d."$($b.P)MacFilterList"
+        if ($listObj) {
+            $total += @($listObj.PSObject.Properties | Where-Object { $_.Name -ne 'max_instance' }).Count
+        }
+    }
+    return [pscustomobject]@{ On = ($on.Count -gt 0); Bands = $on; Addresses = $total }
+}
 
 # ------------------------------------------------------------------ данные ---
 
@@ -89,7 +113,19 @@ function Get-BlockState {
     # Сначала заблокированные, потом по имени
     $rows = $rows | Sort-Object @{ Expression = 'Blocked'; Descending = $true }, Name
 
-    return [pscustomobject]@{ Policy = $policy; Rows = @($rows) }
+    $wifi = Get-WifiWhitelistState
+    if ($wifi.On) {
+        $wifiText = "ВКЛЮЧЁН ($($wifi.Bands -join ' и ') — доступ только у $($wifi.Addresses) адресов)"
+    } else {
+        $wifiText = 'выключен — Wi-Fi открыт для всех'
+    }
+
+    return [pscustomobject]@{
+        Policy   = $policy
+        Rows     = @($rows)
+        WifiOn   = $wifi.On
+        WifiText = $wifiText
+    }
 }
 
 # ----------------------------------------------------------- вывод в текст ---
@@ -97,7 +133,13 @@ function Get-BlockState {
 if ($Text) {
     $data = Get-BlockState
     Write-Host ''
-    Write-Host "Политика по умолчанию: $($data.Policy)"
+    Write-Host "Межсетевой экран:   $($data.Policy)"
+    Write-Host 'Белый список Wi-Fi: ' -NoNewline
+    if ($data.WifiOn) {
+        Write-Host $data.WifiText -ForegroundColor Red
+    } else {
+        Write-Host $data.WifiText -ForegroundColor Green
+    }
     Write-Host ''
     if ($data.Rows.Count -eq 0) {
         Write-Host '  Устройств нет'
@@ -110,6 +152,9 @@ if ($Text) {
     }
     Write-Host ''
     Write-Host "Обновлено: $(Get-Date -Format 'HH:mm:ss')"
+    # Чтение фильтра Wi-Fi сдвигает служебный курсор, иначе роутер сочтёт
+    # конфигурацию изменённой и попросит сохранить её вручную.
+    Save-RouterConfig | Out-Null
     return
 }
 
@@ -127,14 +172,20 @@ $form.Font          = New-Object System.Drawing.Font('Segoe UI', 9.5)
 $form.MinimumSize   = New-Object System.Drawing.Size(460, 300)
 
 $lblPolicy = New-Object System.Windows.Forms.Label
-$lblPolicy.Location = New-Object System.Drawing.Point(14, 12)
-$lblPolicy.Size     = New-Object System.Drawing.Size(540, 22)
+$lblPolicy.Location = New-Object System.Drawing.Point(14, 10)
+$lblPolicy.Size     = New-Object System.Drawing.Size(540, 20)
 $lblPolicy.Anchor   = 'Top,Left,Right'
 $form.Controls.Add($lblPolicy)
 
+$lblWifi = New-Object System.Windows.Forms.Label
+$lblWifi.Location = New-Object System.Drawing.Point(14, 32)
+$lblWifi.Size     = New-Object System.Drawing.Size(540, 20)
+$lblWifi.Anchor   = 'Top,Left,Right'
+$form.Controls.Add($lblWifi)
+
 $list = New-Object System.Windows.Forms.ListView
-$list.Location      = New-Object System.Drawing.Point(14, 40)
-$list.Size          = New-Object System.Drawing.Size(540, 290)
+$list.Location      = New-Object System.Drawing.Point(14, 58)
+$list.Size          = New-Object System.Drawing.Size(540, 272)
 $list.Anchor        = 'Top,Left,Right,Bottom'
 $list.View          = 'Details'
 $list.FullRowSelect = $true
@@ -176,7 +227,15 @@ function Update-View {
     $list.Items.Clear()
     try {
         $data = Get-BlockState
-        $lblPolicy.Text = "Политика по умолчанию: $($data.Policy)"
+        $lblPolicy.Text = "Межсетевой экран: $($data.Policy)"
+        $lblWifi.Text   = "Белый список Wi-Fi: $($data.WifiText)"
+        if ($data.WifiOn) {
+            $lblWifi.ForeColor = $colorBlocked
+            $lblWifi.Font = New-Object System.Drawing.Font($form.Font, [System.Drawing.FontStyle]::Bold)
+        } else {
+            $lblWifi.ForeColor = $colorAllowed
+            $lblWifi.Font = $form.Font
+        }
 
         foreach ($row in $data.Rows) {
             $item = New-Object System.Windows.Forms.ListViewItem($row.Name)
@@ -200,6 +259,7 @@ function Update-View {
         }
 
         $lblTime.Text = "Обновлено: $(Get-Date -Format 'HH:mm:ss')"
+        Save-RouterConfig | Out-Null
     }
     catch {
         $lblPolicy.Text = 'Не удалось получить данные'
