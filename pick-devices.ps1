@@ -57,11 +57,16 @@ function Test-RandomMac([string]$Mac) {
 
 function Get-SafeAlias([string]$Name) {
     <#  Имя становится ключом devices.json и именем файла ярлыка, поэтому
-        выкидываем всё, что Windows не пустит в имя файла. #>
+        убираем то, что Windows действительно не пустит в имя файла.
+
+        Пробелы законны и остаются на месте: замена их на дефисы приводила
+        к тому, что имя из двух слов отвергалось с сообщением про
+        недопустимые символы. Точка в конце имени файла недопустима —
+        её срезаем. #>
     $clean = ([string]$Name) -replace '[\\/:\*\?"<>\|]', '-'
-    $clean = $clean -replace '\s+', '-'
-    $clean = $clean.Trim([char[]]@('-', ' ', '.'))
-    if ($clean.Length -gt 24) { $clean = $clean.Substring(0, 24) }
+    $clean = $clean -replace '\s+', ' '
+    $clean = $clean.Trim([char[]]@(' ', '.'))
+    if ($clean.Length -gt 24) { $clean = $clean.Substring(0, 24).Trim() }
     return $clean
 }
 
@@ -259,10 +264,10 @@ $colorDisabled = [System.Drawing.Color]::FromArgb(240, 240, 240)
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text          = 'Устройства в сети'
-$form.Size          = New-Object System.Drawing.Size(940, 580)
+$form.Size          = New-Object System.Drawing.Size(940, 615)
 $form.StartPosition = 'CenterScreen'
 $form.Font          = New-Object System.Drawing.Font('Segoe UI', 9.5)
-$form.MinimumSize   = New-Object System.Drawing.Size(780, 440)
+$form.MinimumSize   = New-Object System.Drawing.Size(780, 480)
 
 $fontBold = New-Object System.Drawing.Font($form.Font, [System.Drawing.FontStyle]::Bold)
 
@@ -313,38 +318,52 @@ Add-GridColumn 'Блокировать'        100 $true  $false
 Add-GridColumn 'Белый список Wi-Fi' 130 $true  $false
 
 $lblLegend = New-Object System.Windows.Forms.Label
-$lblLegend.Location  = New-Object System.Drawing.Point(14, 478)
-$lblLegend.Size      = New-Object System.Drawing.Size(900, 34)
+$lblLegend.Location  = New-Object System.Drawing.Point(14, 476)
+$lblLegend.Size      = New-Object System.Drawing.Size(900, 52)
 $lblLegend.Anchor    = 'Bottom,Left,Right'
 $lblLegend.ForeColor = [System.Drawing.Color]::Gray
 $lblLegend.Text      = ('Красным — случайные адреса: устройство меняет их при переподключении, и правило перестаёт действовать.' + [Environment]::NewLine +
-                       'Белый список работает только по Wi-Fi и только когда он включён; его состояние показывает окно «Статус».')
+                       'Белый список работает только по Wi-Fi и только когда он включён; его состояние показывает окно «Статус».' + [Environment]::NewLine +
+                       'Тихий компьютер на кабеле может показываться как «был в сети»: роутер забывает о нём, пока тот молчит.')
 $form.Controls.Add($lblLegend)
 
 $lblTime = New-Object System.Windows.Forms.Label
-$lblTime.Location  = New-Object System.Drawing.Point(14, 516)
-$lblTime.Size      = New-Object System.Drawing.Size(360, 22)
+$lblTime.Location  = New-Object System.Drawing.Point(14, 534)
+$lblTime.Size      = New-Object System.Drawing.Size(230, 22)
 $lblTime.Anchor    = 'Bottom,Left'
 $lblTime.ForeColor = [System.Drawing.Color]::Gray
 $form.Controls.Add($lblTime)
 
+# Правки в таблице сами по себе ничего не сохраняют, и это неочевидно:
+# набрать имя, нажать Enter и уйти — естественное движение. Пока есть
+# несохранённое, об этом говорит подпись рядом с кнопкой.
+$lblDirty = New-Object System.Windows.Forms.Label
+$lblDirty.Location  = New-Object System.Drawing.Point(250, 534)
+$lblDirty.Size      = New-Object System.Drawing.Size(360, 22)
+$lblDirty.Anchor    = 'Bottom,Left'
+$lblDirty.ForeColor = $colorWarn
+$lblDirty.Font      = $fontBold
+$lblDirty.Text      = 'Есть несохранённые изменения — нажмите «Применить»'
+$lblDirty.Visible   = $false
+$form.Controls.Add($lblDirty)
+
 $btnRefresh = New-Object System.Windows.Forms.Button
 $btnRefresh.Text     = 'Обновить'
-$btnRefresh.Location = New-Object System.Drawing.Point(624, 512)
+$btnRefresh.Location = New-Object System.Drawing.Point(624, 532)
 $btnRefresh.Size     = New-Object System.Drawing.Size(90, 28)
 $btnRefresh.Anchor   = 'Bottom,Right'
 $form.Controls.Add($btnRefresh)
 
 $btnApply = New-Object System.Windows.Forms.Button
 $btnApply.Text     = 'Применить'
-$btnApply.Location = New-Object System.Drawing.Point(720, 512)
+$btnApply.Location = New-Object System.Drawing.Point(720, 532)
 $btnApply.Size     = New-Object System.Drawing.Size(100, 28)
 $btnApply.Anchor   = 'Bottom,Right'
 $form.Controls.Add($btnApply)
 
 $btnClose = New-Object System.Windows.Forms.Button
 $btnClose.Text     = 'Закрыть'
-$btnClose.Location = New-Object System.Drawing.Point(826, 512)
+$btnClose.Location = New-Object System.Drawing.Point(826, 532)
 $btnClose.Size     = New-Object System.Drawing.Size(88, 28)
 $btnClose.Anchor   = 'Bottom,Right'
 $btnClose.Add_Click({ $form.Close() })
@@ -352,18 +371,45 @@ $form.Controls.Add($btnClose)
 
 # ------------------------------------------------------------------ логика ---
 
+# Заполнение таблицы тоже меняет ячейки, поэтому на время загрузки отметку
+# о несохранённом надо глушить.
+$script:Loading = $false
+
+# Роутер помнит клиента, только пока тот подаёт признаки жизни: тихий
+# компьютер на кабеле пропадает из его списка, и тип подключения обнулился
+# бы прямо на глазах. Запоминаем последнее известное на время работы окна.
+$script:LastLink = @{}
+
+function Set-DirtyState([bool]$On) {
+    $lblDirty.Visible = $On
+}
+
 function Update-View {
     $form.Cursor        = 'WaitCursor'
     $btnRefresh.Enabled = $false
     $btnApply.Enabled   = $false
+    $script:Loading     = $true
     try {
         $inventory = Get-DeviceInventory
         $grid.Rows.Clear()
         foreach ($r in $inventory) {
-            $i = $grid.Rows.Add($r.Alias, $r.Mac, (Get-LinkText $r), (Get-StateText $r),
+            $link      = Get-LinkText $r
+            $linkKnown = ($link -ne '—')
+            if ($linkKnown) {
+                $script:LastLink[$r.Mac] = $link
+            } elseif ($script:LastLink.ContainsKey($r.Mac)) {
+                $link = $script:LastLink[$r.Mac]
+            }
+
+            $i = $grid.Rows.Add($r.Alias, $r.Mac, $link, (Get-StateText $r),
                                 $r.Ip, $r.Blocked, $r.InWhitelist)
             $row = $grid.Rows[$i]
             $row.Tag = $r
+
+            if (-not $linkKnown -and $link -ne '—') {
+                $row.Cells[$COL_LINK].Style.ForeColor = [System.Drawing.Color]::Gray
+                $row.Cells[$COL_LINK].ToolTipText     = 'Последнее известное подключение. Сейчас роутер это устройство не видит.'
+            }
 
             if ($r.Random) {
                 $row.Cells[$COL_MAC].Style.ForeColor = $colorWarn
@@ -392,11 +438,22 @@ function Update-View {
             [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
     }
     finally {
+        $script:Loading     = $false
         $btnRefresh.Enabled = $true
         $btnApply.Enabled   = $true
         $form.Cursor        = 'Default'
+        Set-DirtyState $false
     }
 }
+
+# Галочка не считается изменённой, пока фокус не ушёл из ячейки. Без этого
+# отметка о несохранённом появлялась бы с опозданием на одно нажатие.
+$grid.Add_CurrentCellDirtyStateChanged({
+    if ($grid.IsCurrentCellDirty) {
+        $grid.CommitEdit([System.Windows.Forms.DataGridViewDataErrorContexts]::Commit) | Out-Null
+    }
+})
+$grid.Add_CellValueChanged({ if (-not $script:Loading) { Set-DirtyState $true } })
 
 function Get-GridState {
     <# Снимок таблицы: что стоит в галочках и полях прямо сейчас. #>
