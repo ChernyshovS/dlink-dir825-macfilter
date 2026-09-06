@@ -117,49 +117,91 @@ function New-RouterDigestHeader {
 }
 
 function Assert-RouterAuthorized($Response) {
-    <#  A second 401 means the password is wrong. The router bans further
-        attempts after five, so say how many are left rather than retrying. #>
+    <#  Still 401 after the signed request was retried: the password is
+        almost certainly wrong. The router bans further attempts after five,
+        so report how many are left rather than trying again. #>
     if ([int]$Response.StatusCode -ne 401) { return }
     $remain = $null
     $left = 'unknown'
     if ($Response.Headers.TryGetValues('Anweb-Auth-Try-Count-Remain', [ref]$remain)) { $left = @($remain)[0] }
-    throw ("Authentication rejected by the router (attempts left before a temporary ban: $left). " +
-           "Delete $($script:RA_CredFile) and run 'setup' again.")
+    throw ("Authentication rejected by the router, twice in a row (attempts left before a " +
+           "temporary ban: $left). If the password has changed, delete $($script:RA_CredFile) " +
+           "and run 'setup' again.")
+}
+
+function Invoke-RouterHttp {
+    <#  One request, complete with the digest handshake, for either endpoint.
+
+        Method is GET or POST, Path is the bare path the router signs over,
+        Url is the real target (query string included), Body is the JSON of
+        a POST. Returns the response body as text.
+
+        The handshake is attempted twice. Under a burst of requests the
+        router sometimes answers a correctly signed request with another 401,
+        while still reporting a full quota of attempts -- so a single retry
+        turns a transient refusal into a short pause instead of a message
+        telling the user to delete their stored password. #>
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('GET', 'POST')][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Url,
+        [string]$Body
+    )
+
+    $cred         = Get-RouterCredential
+    $httpMethod   = if ($Method -eq 'POST') { [System.Net.Http.HttpMethod]::Post } else { [System.Net.Http.HttpMethod]::Get }
+    $lastResponse = $null
+
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $client = New-RouterHttpClient
+        try {
+            if ($Method -eq 'POST') {
+                $c1 = New-Object System.Net.Http.StringContent($Body, [System.Text.Encoding]::UTF8, 'application/json')
+                $r1 = $client.PostAsync($Url, $c1).GetAwaiter().GetResult()
+            } else {
+                $r1 = $client.GetAsync($Url).GetAwaiter().GetResult()
+            }
+
+            # Some responses arrive without a challenge at all -- pass them
+            # straight through, the caller decides what they mean.
+            if ([int]$r1.StatusCode -ne 401) {
+                return $r1.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            }
+
+            $auth = New-RouterDigestHeader -Challenge (Get-RouterChallenge $r1) `
+                                           -Method $Method -Path $Path -Cred $cred
+
+            $req = New-Object System.Net.Http.HttpRequestMessage($httpMethod, $Url)
+            if ($Method -eq 'POST') {
+                $req.Content = New-Object System.Net.Http.StringContent($Body, [System.Text.Encoding]::UTF8, 'application/json')
+            }
+            $req.Headers.TryAddWithoutValidation('Authorization', $auth) | Out-Null
+            $req.Headers.TryAddWithoutValidation('anweb-repeat-request', 'true') | Out-Null
+            $r2 = $client.SendAsync($req).GetAwaiter().GetResult()
+
+            if ([int]$r2.StatusCode -ne 401) {
+                $text = $r2.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                if (-not $text) { throw "Empty response from router (HTTP $([int]$r2.StatusCode))." }
+                return $text
+            }
+            $lastResponse = $r2
+        }
+        finally { $client.Dispose() }
+
+        if ($attempt -lt 2) { Start-Sleep -Milliseconds 500 }
+    }
+
+    Assert-RouterAuthorized $lastResponse
+    throw 'Router refused the request after two authentication attempts.'
 }
 
 function Invoke-RouterRpc {
     param([Parameter(Mandatory = $true)][hashtable]$Payload)
 
-    $cred = Get-RouterCredential
     $body = $Payload | ConvertTo-Json -Depth 25 -Compress
     $url  = "http://$($script:RA_Router)$($script:RA_Endpoint)"
-
-    $client = New-RouterHttpClient
-    try {
-        $c1 = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, 'application/json')
-        $r1 = $client.PostAsync($url, $c1).GetAwaiter().GetResult()
-
-        if ([int]$r1.StatusCode -ne 401) {
-            return ($r1.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json)
-        }
-
-        $auth = New-RouterDigestHeader -Challenge (Get-RouterChallenge $r1) `
-                                       -Method 'POST' -Path $script:RA_Endpoint -Cred $cred
-
-        $c2  = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, 'application/json')
-        $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, $url)
-        $req.Content = $c2
-        $req.Headers.TryAddWithoutValidation('Authorization', $auth) | Out-Null
-        $req.Headers.TryAddWithoutValidation('anweb-repeat-request', 'true') | Out-Null
-        $r2 = $client.SendAsync($req).GetAwaiter().GetResult()
-
-        Assert-RouterAuthorized $r2
-        $text = $r2.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-        if (-not $text) { throw "Empty response from router (HTTP $([int]$r2.StatusCode))." }
-
-        return ($text | ConvertFrom-Json)
-    }
-    finally { $client.Dispose() }
+    $text = Invoke-RouterHttp -Method 'POST' -Path $script:RA_Endpoint -Url $url -Body $body
+    return ($text | ConvertFrom-Json)
 }
 
 function Get-RouterDevInfo {
@@ -176,33 +218,10 @@ function Get-RouterDevInfo {
         Save-RouterConfig afterwards. #>
     param([Parameter(Mandatory = $true)][string[]]$Area)
 
-    $cred = Get-RouterCredential
     $path = $script:RA_DevInfo
     $url  = "http://$($script:RA_Router)$path" + '?area=' + ($Area -join '|') + '&need_auth=1'
-
-    $client = New-RouterHttpClient
-    try {
-        $r1 = $client.GetAsync($url).GetAwaiter().GetResult()
-        if ([int]$r1.StatusCode -eq 200) {
-            return (($r1.Content.ReadAsStringAsync().GetAwaiter().GetResult()) | ConvertFrom-Json).result
-        }
-        if ([int]$r1.StatusCode -ne 401) { throw "devinfo returned HTTP $([int]$r1.StatusCode)." }
-
-        $auth = New-RouterDigestHeader -Challenge (Get-RouterChallenge $r1) `
-                                       -Method 'GET' -Path $path -Cred $cred
-
-        $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $url)
-        $req.Headers.TryAddWithoutValidation('Authorization', $auth) | Out-Null
-        $req.Headers.TryAddWithoutValidation('anweb-repeat-request', 'true') | Out-Null
-        $r2 = $client.SendAsync($req).GetAwaiter().GetResult()
-
-        Assert-RouterAuthorized $r2
-        $text = $r2.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-        if (-not $text) { throw "Empty devinfo response (HTTP $([int]$r2.StatusCode))." }
-
-        return ($text | ConvertFrom-Json).result
-    }
-    finally { $client.Dispose() }
+    $text = Invoke-RouterHttp -Method 'GET' -Path $path -Url $url
+    return ($text | ConvertFrom-Json).result
 }
 
 # ------------------------------------------------------------ config calls ---
