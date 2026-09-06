@@ -96,6 +96,31 @@ function Get-Whitelist {
     return $result
 }
 
+function Get-WhitelistDevices($ByBand) {
+    <#  Тот же белый список, но с точки зрения устройства, а не диапазона:
+        имя, адрес и в каких диапазонах он разрешён.
+
+        Перечислять содержимое каждого фильтра по отдельности сбивает с
+        толку. Ноутбук с аппаратным адресом попадает в оба списка с одним и
+        тем же адресом — и это выглядит ошибкой, хотя так и должно быть:
+        адрес принадлежит адаптеру, а не сети. Телефон с рандомизацией,
+        наоборот, приходит в каждую сеть со своим адресом и занимает две
+        разные строки. Рядом эти два случая читаются понятно. #>
+
+    $order = @()
+    $byMac = @{}
+    foreach ($b in $Bands) {
+        foreach ($e in $ByBand[$b.Key]) {
+            if (-not $byMac.ContainsKey($e.Mac)) {
+                $byMac[$e.Mac] = [pscustomobject]@{ Name = $e.Name; Mac = $e.Mac; Bands = @() }
+                $order += $e.Mac
+            }
+            $byMac[$e.Mac].Bands += $b.Key
+        }
+    }
+    return @($order | ForEach-Object { $byMac[$_] } | Sort-Object Name)
+}
+
 function Set-BandCursor([string]$Prefix) {
     # Курсор выбирает сеть внутри диапазона. Сеть у нас одна, поэтому всегда 1.
     # save=$false: значение служебное, во флеш-память его писать незачем.
@@ -233,9 +258,8 @@ function Invoke-Enable {
 
     # --- подтверждение ---------------------------------------------------
     $lines = @('После включения доступ к Wi-Fi сохранят только эти устройства:', '')
-    foreach ($b in $Bands) {
-        $lines += "  $($b.Title):"
-        foreach ($e in $wl[$b.Key]) { $lines += "     $($e.Mac)   $($e.Name)" }
+    foreach ($d in (Get-WhitelistDevices $wl)) {
+        $lines += ('  {0,-18} {1}   {2} ГГц' -f $d.Name, $d.Mac, ($d.Bands -join ' и '))
     }
     $lines += ''
     $lines += 'Все остальные устройства не смогут подключиться к Wi-Fi.'
