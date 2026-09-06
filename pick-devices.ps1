@@ -273,7 +273,7 @@ $form.Text          = 'Устройства в сети'
 $form.Size          = New-Object System.Drawing.Size(940, 645)
 $form.StartPosition = 'CenterScreen'
 $form.Font          = New-Object System.Drawing.Font('Segoe UI', 9.5)
-$form.MinimumSize   = New-Object System.Drawing.Size(780, 520)
+$form.MinimumSize   = New-Object System.Drawing.Size(860, 520)
 
 $fontBold = New-Object System.Drawing.Font($form.Font, [System.Drawing.FontStyle]::Bold)
 
@@ -316,12 +316,19 @@ function Add-GridColumn([string]$Header, [int]$Width, [bool]$IsCheck, [bool]$Rea
 }
 
 Add-GridColumn 'Имя'                160 $false $false
-Add-GridColumn 'MAC-адрес'          150 $false $true
-Add-GridColumn 'Подключение'        125 $false $true
-Add-GridColumn 'Состояние'           95 $false $true
-Add-GridColumn 'IP-адрес'           130 $false $true
-Add-GridColumn 'Блокировать'        100 $true  $false
+Add-GridColumn 'MAC-адрес'          140 $false $true
+Add-GridColumn 'Подключение'        105 $false $true
+Add-GridColumn 'Состояние'           90 $false $true
+Add-GridColumn 'IP-адрес'           105 $false $true
+Add-GridColumn 'Блокировать'         95 $true  $false
 Add-GridColumn 'Белый список Wi-Fi' 130 $true  $false
+
+# Столбец имени забирает остаток ширины. Иначе сумма столбцов почти равна
+# ширине таблицы, и стоит появиться вертикальному ползунку, как места не
+# хватает и вылезает ещё и горизонтальный. Нижняя граница — чтобы при
+# сжатии окна столбец не схлопнулся в ничто.
+$grid.Columns[$COL_NAME].AutoSizeMode = 'Fill'
+$grid.Columns[$COL_NAME].MinimumWidth = 110
 
 $lblLegend = New-Object System.Windows.Forms.Label
 $lblLegend.Location  = New-Object System.Drawing.Point(14, 470)
