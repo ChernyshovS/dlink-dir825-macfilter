@@ -271,24 +271,24 @@ $colorDisabled = [System.Drawing.Color]::FromArgb(240, 240, 240)
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text          = 'Устройства в сети'
-$form.Size          = New-Object System.Drawing.Size(940, 615)
+$form.Size          = New-Object System.Drawing.Size(940, 645)
 $form.StartPosition = 'CenterScreen'
 $form.Font          = New-Object System.Drawing.Font('Segoe UI', 9.5)
-$form.MinimumSize   = New-Object System.Drawing.Size(780, 480)
+$form.MinimumSize   = New-Object System.Drawing.Size(780, 520)
 
 $fontBold = New-Object System.Drawing.Font($form.Font, [System.Drawing.FontStyle]::Bold)
 
 $lblHint = New-Object System.Windows.Forms.Label
 $lblHint.Location = New-Object System.Drawing.Point(14, 10)
-$lblHint.Size     = New-Object System.Drawing.Size(900, 34)
+$lblHint.Size     = New-Object System.Drawing.Size(900, 40)
 $lblHint.Anchor   = 'Top,Left,Right'
 $lblHint.Text     = ('Отметьте, кого заблокировать и кого держать в белом списке Wi-Fi, затем нажмите «Применить».' + [Environment]::NewLine +
                      'Имя можно исправить прямо в таблице — оно станет именем ярлыка.')
 $form.Controls.Add($lblHint)
 
 $grid = New-Object System.Windows.Forms.DataGridView
-$grid.Location = New-Object System.Drawing.Point(14, 50)
-$grid.Size     = New-Object System.Drawing.Size(900, 420)
+$grid.Location = New-Object System.Drawing.Point(14, 54)
+$grid.Size     = New-Object System.Drawing.Size(900, 410)
 $grid.Anchor   = 'Top,Left,Right,Bottom'
 $grid.AllowUserToAddRows          = $false
 $grid.AllowUserToDeleteRows       = $false
@@ -325,8 +325,8 @@ Add-GridColumn 'Блокировать'        100 $true  $false
 Add-GridColumn 'Белый список Wi-Fi' 130 $true  $false
 
 $lblLegend = New-Object System.Windows.Forms.Label
-$lblLegend.Location  = New-Object System.Drawing.Point(14, 476)
-$lblLegend.Size      = New-Object System.Drawing.Size(900, 52)
+$lblLegend.Location  = New-Object System.Drawing.Point(14, 470)
+$lblLegend.Size      = New-Object System.Drawing.Size(900, 60)
 $lblLegend.Anchor    = 'Bottom,Left,Right'
 $lblLegend.ForeColor = [System.Drawing.Color]::Gray
 $lblLegend.Text      = ('Красным — случайные адреса: устройство меняет их при переподключении, и правило перестаёт действовать.' + [Environment]::NewLine +
@@ -334,43 +334,35 @@ $lblLegend.Text      = ('Красным — случайные адреса: у�
                        '«Не отвечает» — роутер помнит устройство, но связь не подтверждена: обычно оно только что отключилось.')
 $form.Controls.Add($lblLegend)
 
+# Одна строка состояния на две роли: обычно показывает время обновления,
+# а пока есть несохранённое — предупреждение. Двумя подписями рядом это
+# не сделать: при масштабировании экрана они налезают друг на друга и на
+# кнопки. Высоты хватает на две строки, поэтому длинный текст переносится,
+# а не обрезается.
 $lblTime = New-Object System.Windows.Forms.Label
-$lblTime.Location  = New-Object System.Drawing.Point(14, 534)
-$lblTime.Size      = New-Object System.Drawing.Size(230, 22)
+$lblTime.Location  = New-Object System.Drawing.Point(14, 536)
+$lblTime.Size      = New-Object System.Drawing.Size(430, 40)
 $lblTime.Anchor    = 'Bottom,Left'
 $lblTime.ForeColor = [System.Drawing.Color]::Gray
 $form.Controls.Add($lblTime)
 
-# Правки в таблице сами по себе ничего не сохраняют, и это неочевидно:
-# набрать имя, нажать Enter и уйти — естественное движение. Пока есть
-# несохранённое, об этом говорит подпись рядом с кнопкой.
-$lblDirty = New-Object System.Windows.Forms.Label
-$lblDirty.Location  = New-Object System.Drawing.Point(250, 534)
-$lblDirty.Size      = New-Object System.Drawing.Size(360, 22)
-$lblDirty.Anchor    = 'Bottom,Left'
-$lblDirty.ForeColor = $colorWarn
-$lblDirty.Font      = $fontBold
-$lblDirty.Text      = 'Есть несохранённые изменения — нажмите «Применить»'
-$lblDirty.Visible   = $false
-$form.Controls.Add($lblDirty)
-
 $btnRefresh = New-Object System.Windows.Forms.Button
 $btnRefresh.Text     = 'Обновить'
-$btnRefresh.Location = New-Object System.Drawing.Point(624, 532)
+$btnRefresh.Location = New-Object System.Drawing.Point(624, 540)
 $btnRefresh.Size     = New-Object System.Drawing.Size(90, 28)
 $btnRefresh.Anchor   = 'Bottom,Right'
 $form.Controls.Add($btnRefresh)
 
 $btnApply = New-Object System.Windows.Forms.Button
 $btnApply.Text     = 'Применить'
-$btnApply.Location = New-Object System.Drawing.Point(720, 532)
+$btnApply.Location = New-Object System.Drawing.Point(720, 540)
 $btnApply.Size     = New-Object System.Drawing.Size(100, 28)
 $btnApply.Anchor   = 'Bottom,Right'
 $form.Controls.Add($btnApply)
 
 $btnClose = New-Object System.Windows.Forms.Button
 $btnClose.Text     = 'Закрыть'
-$btnClose.Location = New-Object System.Drawing.Point(826, 532)
+$btnClose.Location = New-Object System.Drawing.Point(826, 540)
 $btnClose.Size     = New-Object System.Drawing.Size(88, 28)
 $btnClose.Anchor   = 'Bottom,Right'
 $btnClose.Add_Click({ $form.Close() })
@@ -387,8 +379,20 @@ $script:Loading = $false
 # бы прямо на глазах. Запоминаем последнее известное на время работы окна.
 $script:LastLink = @{}
 
+# Текст последнего обновления, чтобы вернуть его в строку состояния,
+# когда предупреждение больше не нужно.
+$script:LastRefreshText = ''
+
 function Set-DirtyState([bool]$On) {
-    $lblDirty.Visible = $On
+    if ($On) {
+        $lblTime.Text      = 'Изменения не сохранены — нажмите «Применить»'
+        $lblTime.ForeColor = $colorWarn
+        $lblTime.Font      = $fontBold
+    } else {
+        $lblTime.Text      = $script:LastRefreshText
+        $lblTime.ForeColor = [System.Drawing.Color]::Gray
+        $lblTime.Font      = $form.Font
+    }
 }
 
 function Update-View {
@@ -436,10 +440,10 @@ function Update-View {
 
             if (-not $r.Online) { $row.Cells[$COL_STATE].Style.ForeColor = [System.Drawing.Color]::Gray }
         }
-        $lblTime.Text = "Обновлено: $(Get-Date -Format 'HH:mm:ss') · устройств: $($inventory.Count)"
+        $script:LastRefreshText = "Обновлено: $(Get-Date -Format 'HH:mm:ss') · устройств: $($inventory.Count)"
     }
     catch {
-        $lblTime.Text = 'Не удалось получить данные'
+        $script:LastRefreshText = 'Не удалось получить данные'
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Ошибка связи с роутером',
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
