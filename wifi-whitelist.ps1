@@ -46,7 +46,6 @@ $ErrorActionPreference = 'Stop'
 $CredFile      = Join-Path $PSScriptRoot 'cred.xml'
 $WhitelistFile = Join-Path $PSScriptRoot 'whitelist.json'
 
-$CFG_CURSOR = 39   # выбор сети, для которой выполняется операция
 $CFG_FILTER = 42   # политика доступа и списки MAC-адресов
 
 # Диапазоны: префикс полей в конфигурации -> человеческое имя и ключ в whitelist.json
@@ -121,17 +120,7 @@ function Get-WhitelistDevices($ByBand) {
     return @($order | ForEach-Object { $byMac[$_] } | Sort-Object Name)
 }
 
-function Set-BandCursor([string]$Prefix) {
-    # Курсор выбирает сеть внутри диапазона. Сеть у нас одна, поэтому всегда 1.
-    # save=$false: значение служебное, во флеш-память его писать незачем.
-    Write-RouterConfig -Id $CFG_CURSOR -Data @{ "${Prefix}mbssidCur" = 1 } -Save $false | Out-Null
-}
-
 function Get-BandState([string]$Prefix) {
-    # Курсор здесь не нужен: ответ на чтение одинаков с ним и без него,
-    # причём в нём сразу поля обоих диапазонов. Лишняя запись изнашивала бы
-    # флеш-память и оставляла флаг «конфигурация изменена» после простого
-    # просмотра состояния. Для записи правил курсор по-прежнему ставим.
     $d = Read-RouterConfig -Id $CFG_FILTER
 
     $policy = [int]$d."${Prefix}AccessPolicy"
@@ -165,22 +154,30 @@ function Get-PolicyTitle([int]$Policy) {
     }
 }
 
+# Все три операции ниже идут с save=false: во флеш-память конфигурацию
+# пишет одна команда в конце действия. Иначе каждое добавленное правило
+# сохранялось бы отдельно — при включении списка это девять записей во
+# флеш вместо одной. Обрыв на середине теперь оставляет изменения только
+# в оперативной конфигурации, и перезагрузка их отменит.
+#
+# Курсор выбора сети (конфигурация 39) не ставится: проверено на
+# устройстве, что запись и удаление и без него попадают в нужный
+# диапазон — его задаёт префикс имени поля. Курсор понадобился бы, будь
+# в диапазоне несколько сетей, например гостевая.
+
 function Add-BandRule([string]$Prefix, [string]$Mac, [string]$Name) {
-    Set-BandCursor $Prefix
     $rule = @{ mac = $Mac; hostname = (Get-SafeHostname $Name); active = $true }
-    Write-RouterConfig -Id $CFG_FILTER -Data @{ "${Prefix}MacFilterList" = $rule } -Pos -1 | Out-Null
+    Write-RouterConfig -Id $CFG_FILTER -Data @{ "${Prefix}MacFilterList" = $rule } -Pos -1 -Save $false | Out-Null
 }
 
 function Remove-BandRule([string]$Prefix, [int]$Pos, $Entry) {
     # Удаляем ту же запись, что и читали: контейнер тот же, что при записи,
     # позиция — номер записи в списке.
-    Set-BandCursor $Prefix
-    Remove-RouterConfig -Id $CFG_FILTER -Data @{ "${Prefix}MacFilterList" = $Entry } -Pos $Pos | Out-Null
+    Remove-RouterConfig -Id $CFG_FILTER -Data @{ "${Prefix}MacFilterList" = $Entry } -Pos $Pos -Save $false | Out-Null
 }
 
 function Set-BandPolicy([string]$Prefix, [int]$Policy) {
-    Set-BandCursor $Prefix
-    Write-RouterConfig -Id $CFG_FILTER -Data @{ "${Prefix}AccessPolicy" = $Policy } | Out-Null
+    Write-RouterConfig -Id $CFG_FILTER -Data @{ "${Prefix}AccessPolicy" = $Policy } -Save $false | Out-Null
 }
 
 function Show-Message([string]$TextBody, [string]$Title, [string]$Icon) {
@@ -388,9 +385,10 @@ try {
         'off'    { Invoke-Disable }
         'sync'   { Invoke-Sync }
     }
-    # Записи курсора и правил оставляют рабочую конфигурацию расходящейся
-    # с сохранённой, и роутер просит сохранить её вручную. Просмотр
-    # состояния ничего не пишет, поэтому сохранять после него нечего.
+    # Единственная запись во флеш-память за всё действие: правила выше
+    # писались с save=false и до этой команды живут только в оперативной
+    # конфигурации, из-за чего роутер считает её изменённой. Просмотр
+    # состояния не пишет вообще ничего, ему сохранять нечего.
     if ($Action -ne 'status') { Save-RouterConfig | Out-Null }
 }
 catch {
