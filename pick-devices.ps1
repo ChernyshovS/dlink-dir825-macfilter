@@ -83,6 +83,7 @@ function Get-Slot($Map, [string]$Mac) {
             Wired       = $false
             Band        = ''
             Online      = $false
+            Seen        = $false
             Blocked     = $false
             InDevices   = $false
             InWhitelist = $false
@@ -115,11 +116,12 @@ function Get-DeviceInventory {
         if ($c.hostname) { $r.Hostname = [string]$c.hostname }
         if ($c.ip -and ([string]$c.ip) -notmatch ':') { $r.Ip = [string]$c.ip }
 
-        # Присутствие в этом списке и означает «в сети». Флаг stale говорит
-        # только о том, что устройство давно не отвечало: тихий компьютер на
-        # кабеле уходит в stale, оставаясь подключённым. Отключённое
-        # устройство пропадает из списка целиком.
-        $r.Online = $true
+        # reachable — роутер подтвердил связь; stale — запись ещё есть, но
+        # связь не подтверждена. Приравнивать stale к присутствию нельзя:
+        # выключенный компьютер какое-то время висит в списке именно так.
+        # Но и к отсутствию тоже — поэтому это отдельное состояние.
+        $r.Seen = $true
+        if ([string]$c.flags -match 'reachable') { $r.Online = $true }
 
         if ($c.name -eq 'WLAN') { $r.Wireless = $true }
         elseif ($c.name)        { $r.Wired    = $true }
@@ -129,9 +131,12 @@ function Get-DeviceInventory {
     # устройство именно на Wi-Fi, и единственный источник диапазона.
     foreach ($w in @($info.'64')) {
         if (-not $w.mac) { continue }
+        # Присутствие здесь означает установленное соединение с точкой
+        # доступа, даже если устройство спит и потому числится stale.
         $r = Get-Slot $map $w.mac
         $r.Wireless = $true
         $r.Online   = $true
+        $r.Seen     = $true
         if ($w.band)     { $r.Band     = [string]$w.band }
         if ($w.hostname) { $r.Hostname = [string]$w.hostname }
     }
@@ -184,6 +189,7 @@ function Get-DeviceInventory {
 
     return @($map.Values |
              Sort-Object @{ Expression = 'Online';  Descending = $true },
+                         @{ Expression = 'Seen';    Descending = $true },
                          @{ Expression = 'Blocked'; Descending = $true },
                          @{ Expression = 'Alias';   Descending = $false })
 }
@@ -199,6 +205,7 @@ function Get-LinkText($Row) {
 
 function Get-StateText($Row) {
     if ($Row.Online) { return 'в сети' }
+    if ($Row.Seen)   { return 'не отвечает' }
     return 'был в сети'
 }
 
@@ -324,7 +331,7 @@ $lblLegend.Anchor    = 'Bottom,Left,Right'
 $lblLegend.ForeColor = [System.Drawing.Color]::Gray
 $lblLegend.Text      = ('Красным — случайные адреса: устройство меняет их при переподключении, и правило перестаёт действовать.' + [Environment]::NewLine +
                        'Белый список работает только по Wi-Fi и только когда он включён; его состояние показывает окно «Статус».' + [Environment]::NewLine +
-                       'Тихий компьютер на кабеле может показываться как «был в сети»: роутер забывает о нём, пока тот молчит.')
+                       '«Не отвечает» — роутер помнит устройство, но связь не подтверждена: обычно оно только что отключилось.')
 $form.Controls.Add($lblLegend)
 
 $lblTime = New-Object System.Windows.Forms.Label
