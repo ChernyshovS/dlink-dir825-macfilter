@@ -1,15 +1,20 @@
 <#
-    Shared low-level access to the router's JSON-RPC API.
+    Shared low-level access to the router's HTTP API.
 
-    Dot-source it, call Initialize-RouterApi once, then use
-    Read-RouterConfig / Write-RouterConfig.
+    Dot-source it, call Initialize-RouterApi once, then use the wrappers:
 
         . (Join-Path $PSScriptRoot 'router-api.ps1')
         Initialize-RouterApi -Router '192.168.0.1' -User 'admin' -CredFile '...\cred.xml'
 
-    Authentication is HTTP Digest MD5 (qop=auth): the challenge arrives in the
-    non-standard "anweb-authenticate" response header, the answer goes back in
-    the ordinary Authorization header plus "anweb-repeat-request: true".
+    Two endpoints are covered.
+
+      POST /jsonrpc   reads and writes the stored configuration
+      GET  /devinfo   reads live status: clients, leases, wireless links
+
+    Authentication is HTTP Digest MD5 (qop=auth) for both, with one twist:
+    the challenge arrives in the non-standard "anweb-authenticate" response
+    header, while the answer goes back in the ordinary Authorization header
+    plus "anweb-repeat-request: true".
 #>
 
 Add-Type -AssemblyName System.Net.Http
@@ -18,6 +23,7 @@ $script:RA_Router   = '192.168.0.1'
 $script:RA_User     = 'admin'
 $script:RA_CredFile = $null
 $script:RA_Endpoint = '/jsonrpc'
+$script:RA_DevInfo  = '/devinfo'
 
 function Initialize-RouterApi {
     param(
@@ -44,73 +50,181 @@ function Get-RouterMd5Hex([string]$Text) {
     -join ($md5.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
 }
 
-function Invoke-RouterRpc {
-    param([Parameter(Mandatory = $true)][hashtable]$Payload)
+function ConvertTo-RouterMac([string]$Mac) {
+    <#  One spelling of a MAC address everywhere: upper case, colon
+        separated. The router itself is inconsistent -- /devinfo area 64
+        answers in upper case, area 34 and the config calls in lower. #>
+    return ([string]$Mac).Trim().ToUpper().Replace('-', ':')
+}
 
-    $cred = Get-RouterCredential
-    $pass = $cred.GetNetworkCredential().Password
-    $body = $Payload | ConvertTo-Json -Depth 25 -Compress
-    $url  = "http://$($script:RA_Router)$($script:RA_Endpoint)"
+function Get-LocalMacAddresses {
+    <#  Addresses of this computer's own adapters, so callers can refuse to
+        block or de-whitelist the machine they are being run from. Lives here
+        because every script in the folder needs the same guard. #>
+    try {
+        return @(Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction Stop |
+                 Where-Object { $_.MACAddress } |
+                 ForEach-Object { ConvertTo-RouterMac $_.MACAddress })
+    } catch { return @() }
+}
 
+# --------------------------------------------------------------- transport ---
+
+function New-RouterHttpClient {
     $handler = New-Object System.Net.Http.HttpClientHandler
     $handler.CookieContainer   = New-Object System.Net.CookieContainer
     $handler.UseCookies        = $true
     $handler.AllowAutoRedirect = $false
     $client = New-Object System.Net.Http.HttpClient($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(20)
-
-    try {
-        $c1 = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, 'application/json')
-        $r1 = $client.PostAsync($url, $c1).GetAwaiter().GetResult()
-
-        if ([int]$r1.StatusCode -ne 401) {
-            return ($r1.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json)
-        }
-
-        $hdr = $null
-        if (-not $r1.Headers.TryGetValues('Anweb-Authenticate', [ref]$hdr)) {
-            throw 'Router did not return an Anweb-Authenticate challenge.'
-        }
-        $challenge = @($hdr)[0]
-
-        $realm = ([regex]'realm="([^"]+)"').Match($challenge).Groups[1].Value
-        $nonce = ([regex]'nonce="([^"]+)"').Match($challenge).Groups[1].Value
-        $qop   = ([regex]'qop="?([a-zA-Z]+)"?').Match($challenge).Groups[1].Value
-        if (-not $qop) { $qop = 'auth' }
-
-        $nc     = '00000001'
-        $chars  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-        $cnonce = -join (1..16 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
-
-        $ha1    = Get-RouterMd5Hex "$($cred.UserName):${realm}:$pass"
-        $ha2    = Get-RouterMd5Hex "POST:$($script:RA_Endpoint)"
-        $rspVal = Get-RouterMd5Hex "${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}"
-
-        $fmt = 'Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", response="{4}", qop={5}, nc={6}, cnonce="{7}"'
-        $authHeader = $fmt -f [uri]::EscapeDataString($cred.UserName), $realm, $nonce,
-                              $script:RA_Endpoint, $rspVal, $qop, $nc, $cnonce
-
-        $c2  = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, 'application/json')
-        $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, $url)
-        $req.Content = $c2
-        $req.Headers.TryAddWithoutValidation('Authorization', $authHeader) | Out-Null
-        $req.Headers.TryAddWithoutValidation('anweb-repeat-request', 'true') | Out-Null
-        $r2 = $client.SendAsync($req).GetAwaiter().GetResult()
-        $text = $r2.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-
-        if ([int]$r2.StatusCode -eq 401) {
-            $remain = $null
-            $left = 'unknown'
-            if ($r2.Headers.TryGetValues('Anweb-Auth-Try-Count-Remain', [ref]$remain)) { $left = @($remain)[0] }
-            throw ("Authentication rejected by the router (attempts left before a temporary ban: $left). " +
-                   "Delete $($script:RA_CredFile) and run 'setup' again.")
-        }
-        if (-not $text) { throw "Empty response from router (HTTP $([int]$r2.StatusCode))." }
-
-        return ($text | ConvertFrom-Json)
-    }
-    finally { $client.Dispose() }
+    return $client
 }
+
+function Get-RouterChallenge($Response) {
+    $hdr = $null
+    if (-not $Response.Headers.TryGetValues('Anweb-Authenticate', [ref]$hdr)) {
+        throw 'Router did not return an Anweb-Authenticate challenge.'
+    }
+    return @($hdr)[0]
+}
+
+function New-RouterDigestHeader {
+    <#  Path is the bare path, without a query string: the router computes
+        HA2 over "METHOD:/devinfo", not over the full request target. #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Challenge,
+        [Parameter(Mandatory = $true)][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Cred
+    )
+
+    $realm = ([regex]'realm="([^"]+)"').Match($Challenge).Groups[1].Value
+    $nonce = ([regex]'nonce="([^"]+)"').Match($Challenge).Groups[1].Value
+    $qop   = ([regex]'qop="?([a-zA-Z]+)"?').Match($Challenge).Groups[1].Value
+    if (-not $qop) { $qop = 'auth' }
+
+    $nc     = '00000001'
+    $chars  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+    $cnonce = -join (1..16 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+
+    $pass   = $Cred.GetNetworkCredential().Password
+    $ha1    = Get-RouterMd5Hex "$($Cred.UserName):${realm}:$pass"
+    $ha2    = Get-RouterMd5Hex "${Method}:${Path}"
+    $rspVal = Get-RouterMd5Hex "${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}"
+
+    $fmt = 'Digest username="{0}", realm="{1}", nonce="{2}", uri="{3}", response="{4}", qop={5}, nc={6}, cnonce="{7}"'
+    return ($fmt -f [uri]::EscapeDataString($Cred.UserName), $realm, $nonce, $Path, $rspVal, $qop, $nc, $cnonce)
+}
+
+function Assert-RouterAuthorized($Response) {
+    <#  Still 401 after the signed request was retried: the password is
+        almost certainly wrong. The router bans further attempts after five,
+        so report how many are left rather than trying again. #>
+    if ([int]$Response.StatusCode -ne 401) { return }
+    $remain = $null
+    $left = 'unknown'
+    if ($Response.Headers.TryGetValues('Anweb-Auth-Try-Count-Remain', [ref]$remain)) { $left = @($remain)[0] }
+    throw ("Authentication rejected by the router, twice in a row (attempts left before a " +
+           "temporary ban: $left). If the password has changed, delete $($script:RA_CredFile) " +
+           "and run 'setup' again.")
+}
+
+function Invoke-RouterHttp {
+    <#  One request, complete with the digest handshake, for either endpoint.
+
+        Method is GET or POST, Path is the bare path the router signs over,
+        Url is the real target (query string included), Body is the JSON of
+        a POST. Returns the response body as text.
+
+        The handshake is attempted twice. Under a burst of requests the
+        router sometimes answers a correctly signed request with another 401,
+        while still reporting a full quota of attempts -- so a single retry
+        turns a transient refusal into a short pause instead of a message
+        telling the user to delete their stored password. #>
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('GET', 'POST')][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Url,
+        [string]$Body
+    )
+
+    $cred         = Get-RouterCredential
+    $httpMethod   = if ($Method -eq 'POST') { [System.Net.Http.HttpMethod]::Post } else { [System.Net.Http.HttpMethod]::Get }
+    $lastResponse = $null
+
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $client = New-RouterHttpClient
+        try {
+            if ($Method -eq 'POST') {
+                $c1 = New-Object System.Net.Http.StringContent($Body, [System.Text.Encoding]::UTF8, 'application/json')
+                $r1 = $client.PostAsync($Url, $c1).GetAwaiter().GetResult()
+            } else {
+                $r1 = $client.GetAsync($Url).GetAwaiter().GetResult()
+            }
+
+            # Some responses arrive without a challenge at all -- pass them
+            # straight through, the caller decides what they mean.
+            if ([int]$r1.StatusCode -ne 401) {
+                return $r1.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            }
+
+            $auth = New-RouterDigestHeader -Challenge (Get-RouterChallenge $r1) `
+                                           -Method $Method -Path $Path -Cred $cred
+
+            $req = New-Object System.Net.Http.HttpRequestMessage($httpMethod, $Url)
+            if ($Method -eq 'POST') {
+                $req.Content = New-Object System.Net.Http.StringContent($Body, [System.Text.Encoding]::UTF8, 'application/json')
+            }
+            $req.Headers.TryAddWithoutValidation('Authorization', $auth) | Out-Null
+            $req.Headers.TryAddWithoutValidation('anweb-repeat-request', 'true') | Out-Null
+            $r2 = $client.SendAsync($req).GetAwaiter().GetResult()
+
+            if ([int]$r2.StatusCode -ne 401) {
+                $text = $r2.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                if (-not $text) { throw "Empty response from router (HTTP $([int]$r2.StatusCode))." }
+                return $text
+            }
+            $lastResponse = $r2
+        }
+        finally { $client.Dispose() }
+
+        if ($attempt -lt 2) { Start-Sleep -Milliseconds 500 }
+    }
+
+    Assert-RouterAuthorized $lastResponse
+    throw 'Router refused the request after two authentication attempts.'
+}
+
+function Invoke-RouterRpc {
+    param([Parameter(Mandatory = $true)][hashtable]$Payload)
+
+    $body = $Payload | ConvertTo-Json -Depth 25 -Compress
+    $url  = "http://$($script:RA_Router)$($script:RA_Endpoint)"
+    $text = Invoke-RouterHttp -Method 'POST' -Path $script:RA_Endpoint -Url $url -Body $body
+    return ($text | ConvertFrom-Json)
+}
+
+function Get-RouterDevInfo {
+    <#  Live status, read-only. Several areas can be fetched in one request;
+        the result is an object with one property per area name.
+
+            $info = Get-RouterDevInfo -Area '187','34','64'
+            $info.'34'    # DHCP leases
+
+        Useful areas: 187 clients, 34 DHCP leases, 64 wireless links,
+        client (the caller itself), version (model and firmware).
+
+        Unlike the config calls this touches nothing, so it needs no
+        Save-RouterConfig afterwards. #>
+    param([Parameter(Mandatory = $true)][string[]]$Area)
+
+    $path = $script:RA_DevInfo
+    $url  = "http://$($script:RA_Router)$path" + '?area=' + ($Area -join '|') + '&need_auth=1'
+    $text = Invoke-RouterHttp -Method 'GET' -Path $path -Url $url
+    return ($text | ConvertFrom-Json).result
+}
+
+# ------------------------------------------------------------ config calls ---
 
 function Save-RouterConfig {
     <#  Commits the running configuration to flash (cmd id 20).
@@ -127,7 +241,7 @@ function Read-RouterConfig {
     param([Parameter(Mandatory = $true)][int]$Id)
 
     $r = Invoke-RouterRpc @{ jsonrpc = '2.0'; method = 'read'; params = @{ id = $Id }; id = 1 }
-    if ($r.error)          { throw "read $Id failed: $($r.error | ConvertTo-Json -Compress)" }
+    if ($r.error)                { throw "read $Id failed: $($r.error | ConvertTo-Json -Compress)" }
     if ($r.result.status -ne 20) { throw "read $Id returned status $($r.result.status)" }
     return $r.result.data
 }
@@ -148,7 +262,30 @@ function Write-RouterConfig {
     if ($PSBoundParameters.ContainsKey('Pos')) { $params['pos'] = $Pos }
 
     $r = Invoke-RouterRpc @{ jsonrpc = '2.0'; method = 'write'; params = $params; id = 2 }
-    if ($r.error)          { throw "write $Id failed: $($r.error | ConvertTo-Json -Compress)" }
+    if ($r.error)                { throw "write $Id failed: $($r.error | ConvertTo-Json -Compress)" }
     if ($r.result.status -ne 20) { throw "write $Id returned status $($r.result.status)" }
+    return $r.result
+}
+
+function Remove-RouterConfig {
+    <#  Deletes one entry from a list-shaped configuration. Data carries the
+        same container a matching Write-RouterConfig call would use, Pos is
+        the entry's own key inside that container.
+
+        Those keys are stable ids, not array indices: deleting one leaves the
+        others where they were, freed numbers are never handed out again, and
+        a new entry gets the next number from a counter. So read the key from
+        the container rather than counting entries, and delete in any order. #>
+    param(
+        [Parameter(Mandatory = $true)][int]$Id,
+        [Parameter(Mandatory = $true)]$Data,
+        [Parameter(Mandatory = $true)][int]$Pos,
+        [bool]$Save = $true
+    )
+
+    $params = @{ id = $Id; data = $Data; pos = $Pos; save = $Save }
+    $r = Invoke-RouterRpc @{ jsonrpc = '2.0'; method = 'remove'; params = $params; id = 4 }
+    if ($r.error)                { throw "remove $Id failed: $($r.error | ConvertTo-Json -Compress)" }
+    if ($r.result.status -ne 20) { throw "remove $Id returned status $($r.result.status)" }
     return $r.result
 }

@@ -18,11 +18,12 @@
     .\dlink-macfilter.ps1 block   -Mac AA:BB:CC:DD:EE:01
     .\dlink-macfilter.ps1 unblock -Name tv
     .\dlink-macfilter.ps1 toggle  -Name tv
+    .\dlink-macfilter.ps1 remove  -Mac AA:BB:CC:DD:EE:01
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status', 'block', 'unblock', 'toggle', 'dump', 'setup')]
+    [ValidateSet('status', 'block', 'unblock', 'toggle', 'dump', 'setup', 'remove')]
     [string]$Action = 'status',
 
     [string]$Mac,
@@ -31,7 +32,10 @@ param(
     [string]$User   = 'admin',
 
     # Allow blocking a MAC that belongs to this computer (normally refused).
-    [switch]$Force
+    [switch]$Force,
+
+    # setup only: skip creating the desktop shortcut for the picker window.
+    [switch]$NoShortcut
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,6 +65,31 @@ function Get-StoredCredential {
     Import-Clixml -Path $CredFile
 }
 
+function New-PickerShortcut {
+    <#  One desktop shortcut, created once at setup: the picker window is the
+        way this tool is normally used, and everything else lives inside it.
+
+        -ExecutionPolicy Bypass is baked in, so the shortcut works on a
+        machine where scripts are otherwise disallowed. -WindowStyle Hidden
+        keeps the console out of the way -- only the window shows. #>
+    $picker = Join-Path $PSScriptRoot 'pick-devices.ps1'
+    if (-not (Test-Path $picker)) {
+        Write-Host 'pick-devices.ps1 not found next to this script; shortcut skipped.' -ForegroundColor DarkYellow
+        return
+    }
+
+    $lnkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Devices.lnk'
+    $shell = New-Object -ComObject WScript.Shell
+    $lnk = $shell.CreateShortcut($lnkPath)
+    $lnk.TargetPath       = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $lnk.Arguments        = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$picker`""
+    $lnk.WorkingDirectory = $PSScriptRoot
+    $lnk.Description      = 'Pick devices to block or to keep on the Wi-Fi whitelist'
+    $lnk.IconLocation     = "$env:SystemRoot\System32\shell32.dll,18"
+    $lnk.Save()
+    Write-Host "Shortcut created: $lnkPath" -ForegroundColor Green
+}
+
 function Get-Devices {
     if (Test-Path $DevFile) { return (Get-Content $DevFile -Raw | ConvertFrom-Json) }
     return $null
@@ -68,7 +97,7 @@ function Get-Devices {
 
 function Resolve-Mac {
     param([string]$MacArg, [string]$NameArg)
-    if ($MacArg) { return $MacArg.ToUpper().Replace('-', ':') }
+    if ($MacArg) { return (ConvertTo-RouterMac $MacArg) }
     if ($NameArg) {
         $devices = Get-Devices
         if ($null -eq $devices) { throw 'No device list yet. Run: .\dlink-macfilter.ps1 setup' }
@@ -77,7 +106,7 @@ function Resolve-Mac {
             $known = ($devices.PSObject.Properties.Name) -join ', '
             throw "Unknown device name '$NameArg'. Known: $known"
         }
-        return ([string]$entry.Value).ToUpper().Replace('-', ':')
+        return (ConvertTo-RouterMac $entry.Value)
     }
     throw 'Specify -Mac <address> or -Name <alias>.'
 }
@@ -133,16 +162,6 @@ function New-Rule {
     return $new
 }
 
-function Get-LocalMacs {
-    $macs = @()
-    try {
-        $macs = @(Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction Stop |
-                  Where-Object { $_.MACAddress } |
-                  ForEach-Object { $_.MACAddress.ToUpper() })
-    } catch { }
-    return $macs
-}
-
 function Initialize-BaseRule {
     <#  The filter starts out completely empty -- not even a default-policy
         entry. The web UI writes that entry at position 0 before appending the
@@ -184,11 +203,37 @@ function Show-Status {
     }
 }
 
+function Remove-Rule {
+    <#  Deletes a rule outright, unlike unblock, which only switches it off.
+
+        Switching off is the right default: re-blocking then costs one
+        request and the history stays visible. Deletion is for entries that
+        will never come back -- a phone with MAC randomisation leaves a new
+        dead address behind every time it changes one. #>
+    param([string]$Target)
+
+    $filter = Read-MacFilter
+    $idx    = Find-RuleIndex -Filter $filter -Target $Target
+    if ($idx -lt 0) {
+        Write-Host "$Target has no rule -- nothing to remove." -ForegroundColor DarkGray
+        return
+    }
+    # Entry 0 carries the default policy rather than a device. Find-RuleIndex
+    # already skips it, but deleting it would silently change how the whole
+    # filter behaves, so refuse explicitly.
+    if ($null -eq $filter[$idx].mac) {
+        throw 'Refusing to delete the default-policy entry.'
+    }
+
+    Remove-RouterConfig -Id $CONFIG_ID -Data $filter[$idx] -Pos $idx | Out-Null
+    Write-Host "REMOVED  $Target" -ForegroundColor Yellow
+}
+
 function Set-Block {
     param([string]$Target, [bool]$Blocked)
 
     if ($Blocked -and -not $Force) {
-        if ((Get-LocalMacs) -contains $Target) {
+        if ((Get-LocalMacAddresses) -contains $Target) {
             throw ("$Target is a network adapter of THIS computer. Blocking it would cut " +
                    "off your own access to the router. Re-run with -Force if you really mean it.")
         }
@@ -240,10 +285,10 @@ switch ($Action) {
         if (-not (Test-Path $DevFile)) {
             @{ example = 'AA:BB:CC:DD:EE:01' } | ConvertTo-Json | Set-Content -Path $DevFile -Encoding UTF8
         }
+        if (-not $NoShortcut) { New-PickerShortcut }
         Write-Host ''
         Write-Host "Device aliases file: $DevFile"
-        Write-Host 'Edit it to map friendly names to MAC addresses, e.g.'
-        Write-Host '  { "tv": "AA:BB:CC:DD:EE:01", "kids": "AA:BB:CC:DD:EE:FF" }'
+        Write-Host 'It only holds display names; you normally fill it from the picker window.'
         Write-Host ''
         Write-Host 'Then check the connection with:  .\dlink-macfilter.ps1 status'
     }
@@ -251,6 +296,10 @@ switch ($Action) {
     'dump' {
         $r = Invoke-RouterRpc @{ jsonrpc = '2.0'; method = 'read'; params = @{ id = $CONFIG_ID }; id = 1 }
         $r | ConvertTo-Json -Depth 25
+    }
+
+    'remove' {
+        Remove-Rule -Target (Resolve-Mac -MacArg $Mac -NameArg $Name)
     }
 
     'status' {
