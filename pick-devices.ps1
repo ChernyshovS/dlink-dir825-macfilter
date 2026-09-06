@@ -298,7 +298,7 @@ if ($Text) {
         $marks = @()
         if ($r.Blocked)     { $marks += 'блок' }
         if ($r.InWhitelist) { $marks += 'белый' }
-        if ($r.Random)      { $marks += 'адрес меняется' }
+        if ($r.Random)      { $marks += 'случайный адрес' }
         Write-Host ('{0,-20} {1,-19} {2,-14} {3,-11} {4,-16} {5}' -f `
                     $r.Alias, $r.Mac, (Get-LinkText $r), (Get-StateText $r), $r.Ip, ($marks -join ', '))
     }
@@ -428,7 +428,7 @@ $lblLegend.Location  = New-Object System.Drawing.Point(14, 505)
 $lblLegend.Size      = New-Object System.Drawing.Size(900, 60)
 $lblLegend.Anchor    = 'Bottom,Left,Right'
 $lblLegend.ForeColor = [System.Drawing.Color]::Gray
-$lblLegend.Text      = ('Красным — случайные адреса: устройство меняет их при переподключении, и правило перестаёт действовать.' + [Environment]::NewLine +
+$lblLegend.Text      = ('Красным — случайные адреса: устройство может сменить такой адрес, и правило перестанет действовать.' + [Environment]::NewLine +
                        'Галочки белого списка действуют, только когда он включён — кнопка справа сверху.' + [Environment]::NewLine +
                        '«Не отвечает» — роутер помнит устройство, но связь не подтверждена: обычно оно только что отключилось.')
 $form.Controls.Add($lblLegend)
@@ -546,7 +546,7 @@ function Update-View {
                 $row.Cells[$COL_MAC].Style.ForeColor = $colorWarn
                 $row.Cells[$COL_MAC].Style.Font      = $fontBold
                 $row.Cells[$COL_MAC].ToolTipText     =
-                    'Случайный адрес. Устройство сменит его при переподключении, и правило перестанет работать. Отключите рандомизацию MAC в настройках Wi-Fi на самом устройстве.'
+                    'Адрес придуман самим устройством, а не выдан изготовителем. Он может смениться — тогда правило останется висеть на прежнем адресе. Чинится отключением рандомизации MAC в настройках сети на самом устройстве, но учтите: устройство вернётся под другим адресом и появится в таблице новой строкой.'
             }
 
             # По Wi-Fi компьютер выходит через другой адаптер, со своим
@@ -679,8 +679,8 @@ function Invoke-Apply {
     $risky = @($blockOn + $wlOn | Where-Object { $_.Row.Random })
     if ($risky.Count -gt 0) {
         $lines += ''
-        $lines += 'Внимание: у этих устройств случайный адрес, и правило перестанет'
-        $lines += 'работать после их переподключения:'
+        $lines += 'Внимание: адрес этих устройств придуман ими самими и может смениться.'
+        $lines += 'Тогда правило останется висеть на прежнем адресе:'
         foreach ($e in $risky) { $lines += "  $($e.Alias)  ($($e.Row.Mac))" }
     }
 
