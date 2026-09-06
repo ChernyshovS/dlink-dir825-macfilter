@@ -326,10 +326,18 @@ $colorWarn     = [System.Drawing.Color]::FromArgb(178, 34, 34)
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text          = 'Устройства в сети'
-$form.Size          = New-Object System.Drawing.Size(940, 680)
 $form.StartPosition = 'CenterScreen'
 $form.Font          = New-Object System.Drawing.Font('Segoe UI', 9.5)
-$form.MinimumSize   = New-Object System.Drawing.Size(860, 560)
+
+# Желаемый размер — 940x680, но на маленьком экране окно не должно
+# оказаться больше рабочей области: заголовок ушёл бы за верхнюю кромку,
+# а нижние кнопки скрылись бы за панелью задач. Нижнюю границу тоже
+# приходится опускать, иначе она не даст окну ужаться до экрана.
+$work = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$form.MinimumSize = New-Object System.Drawing.Size(
+    [Math]::Min(860, $work.Width), [Math]::Min(560, $work.Height))
+$form.Size = New-Object System.Drawing.Size(
+    [Math]::Min(940, $work.Width - 20), [Math]::Min(680, $work.Height - 20))
 
 $fontBold = New-Object System.Drawing.Font($form.Font, [System.Drawing.FontStyle]::Bold)
 
@@ -344,18 +352,23 @@ $form.Controls.Add($lblFirewall)
 
 $lblWifi = New-Object System.Windows.Forms.Label
 $lblWifi.Location = New-Object System.Drawing.Point(14, 32)
-$lblWifi.Size     = New-Object System.Drawing.Size(690, 20)
-$lblWifi.Anchor   = 'Top,Left'
+$lblWifi.Size     = New-Object System.Drawing.Size(770, 20)
+# Обе стороны: закреплённая только слева, подпись не сжималась при
+# сужении окна и наезжала на кнопку, закрывая её собой.
+$lblWifi.Anchor   = 'Top,Left,Right'
 $form.Controls.Add($lblWifi)
 
 # Кнопка одна и меняет надпись по состоянию. Двумя ярлыками это делалось
 # потому, что состояние было не видно и легко было нажать не в ту сторону;
-# здесь оно написано прямо слева от кнопки.
+# здесь оно написано прямо слева от кнопки — поэтому и надпись короткая,
+# что именно включается, сказано в подписи и в подсказке.
 $btnWhitelist = New-Object System.Windows.Forms.Button
-$btnWhitelist.Location = New-Object System.Drawing.Point(714, 29)
-$btnWhitelist.Size     = New-Object System.Drawing.Size(200, 26)
+$btnWhitelist.Location = New-Object System.Drawing.Point(794, 29)
+$btnWhitelist.Size     = New-Object System.Drawing.Size(120, 26)
 $btnWhitelist.Anchor   = 'Top,Right'
 $form.Controls.Add($btnWhitelist)
+
+$tips = New-Object System.Windows.Forms.ToolTip
 
 $lblHint = New-Object System.Windows.Forms.Label
 $lblHint.Location = New-Object System.Drawing.Point(14, 58)
@@ -497,13 +510,15 @@ function Update-View {
         $lblFirewall.Text = "Межсетевой экран: $($script:Summary.Firewall)"
         $lblWifi.Text     = "Белый список Wi-Fi: $($script:Summary.WifiText)"
         if ($script:Summary.WifiOn) {
-            $lblWifi.ForeColor    = $colorWarn
-            $lblWifi.Font         = $fontBold
-            $btnWhitelist.Text    = 'Выключить белый список'
+            $lblWifi.ForeColor = $colorWarn
+            $lblWifi.Font      = $fontBold
+            $btnWhitelist.Text = 'Выключить'
+            $tips.SetToolTip($btnWhitelist, 'Выключить белый список Wi-Fi: сеть снова откроется для всех устройств.')
         } else {
-            $lblWifi.ForeColor    = $colorOk
-            $lblWifi.Font         = $form.Font
-            $btnWhitelist.Text    = 'Включить белый список'
+            $lblWifi.ForeColor = $colorOk
+            $lblWifi.Font      = $form.Font
+            $btnWhitelist.Text = 'Включить'
+            $tips.SetToolTip($btnWhitelist, 'Включить белый список Wi-Fi: к сети смогут подключиться только отмеченные устройства.')
         }
         $btnWhitelist.Enabled = (Test-Path $WhitelistScript)
 
