@@ -17,12 +17,13 @@
     .\wifi-whitelist.ps1 status
     .\wifi-whitelist.ps1 on
     .\wifi-whitelist.ps1 off
+    .\wifi-whitelist.ps1 sync
     .\wifi-whitelist.ps1 on -Text -NoConfirm
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status', 'on', 'off')]
+    [ValidateSet('status', 'on', 'off', 'sync')]
     [string]$Action = 'status',
 
     # Работать в консоли, без диалоговых окон.
@@ -62,18 +63,6 @@ Initialize-RouterApi -Router $Router -User $User -CredFile $CredFile
 
 # --------------------------------------------------------------- вспомогательное ---
 
-function ConvertTo-NormalMac([string]$Mac) {
-    return ([string]$Mac).Trim().ToUpper().Replace('-', ':')
-}
-
-function Get-LocalMacs {
-    try {
-        return @(Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction Stop |
-                 Where-Object { $_.MACAddress } |
-                 ForEach-Object { ConvertTo-NormalMac $_.MACAddress })
-    } catch { return @() }
-}
-
 function Get-SafeHostname([string]$Name) {
     # В поле hostname роутера кладём только латиницу и цифры: кириллица в
     # прошивке не проверялась, рисковать не будем.
@@ -94,7 +83,7 @@ function Get-Whitelist {
 
     foreach ($entry in @($raw)) {
         if (-not $entry.mac) { continue }
-        $mac  = ConvertTo-NormalMac $entry.mac
+        $mac  = ConvertTo-RouterMac $entry.mac
         $name = if ($entry.name) { [string]$entry.name } else { '—' }
         $band = if ($entry.band) { [string]$entry.band } else { 'both' }
 
@@ -124,10 +113,14 @@ function Get-BandState([string]$Prefix) {
         foreach ($p in $listObj.PSObject.Properties) {
             if ($p.Name -eq 'max_instance') { continue }
             if ($p.Value.mac) {
+                # Имя свойства — это позиция записи в списке. Она понадобится
+                # для удаления, поэтому запоминаем её вместе с самой записью.
                 $listed += [pscustomobject]@{
-                    Mac    = ConvertTo-NormalMac $p.Value.mac
+                    Mac    = ConvertTo-RouterMac $p.Value.mac
                     Host   = [string]$p.Value.hostname
                     Active = [bool]$p.Value.active
+                    Pos    = [int]$p.Name
+                    Raw    = $p.Value
                 }
             }
         }
@@ -148,6 +141,13 @@ function Add-BandRule([string]$Prefix, [string]$Mac, [string]$Name) {
     Set-BandCursor $Prefix
     $rule = @{ mac = $Mac; hostname = (Get-SafeHostname $Name); active = $true }
     Write-RouterConfig -Id $CFG_FILTER -Data @{ "${Prefix}MacFilterList" = $rule } -Pos -1 | Out-Null
+}
+
+function Remove-BandRule([string]$Prefix, [int]$Pos, $Entry) {
+    # Удаляем ту же запись, что и читали: контейнер тот же, что при записи,
+    # позиция — номер записи в списке.
+    Set-BandCursor $Prefix
+    Remove-RouterConfig -Id $CFG_FILTER -Data @{ "${Prefix}MacFilterList" = $Entry } -Pos $Pos | Out-Null
 }
 
 function Set-BandPolicy([string]$Prefix, [int]$Policy) {
@@ -200,7 +200,7 @@ function Invoke-Status {
 
 function Invoke-Enable {
     $wl = Get-Whitelist
-    $localMacs = Get-LocalMacs
+    $localMacs = Get-LocalMacAddresses
 
     # --- проверки до любой записи ---------------------------------------
     foreach ($b in $Bands) {
@@ -276,6 +276,68 @@ function Invoke-Enable {
     Show-Message ($report -join [Environment]::NewLine) 'Белый список Wi-Fi' 'info'
 }
 
+function Invoke-Sync {
+    <#  Приводит списки на роутере в соответствие с whitelist.json: лишние
+        адреса удаляет, недостающие добавляет. Политику доступа не трогает —
+        включение и выключение остаются отдельными действиями.
+
+        Нужно потому, что «включить» умеет только добавлять. Без удаления
+        вычеркнутое из файла устройство сохраняло бы доступ к Wi-Fi, и файл
+        перестал бы быть единственным источником правды. #>
+
+    $wl        = Get-Whitelist
+    $localMacs = Get-LocalMacAddresses
+
+    # --- проверка до любой записи ----------------------------------------
+    foreach ($b in $Bands) {
+        $st   = Get-BandState $b.Prefix
+        $want = @($wl[$b.Key].Mac)
+        if ($st.Policy -eq $POLICY_ALLOW -and -not $Force) {
+            $losing = @($st.Rules | Where-Object { $want -notcontains $_.Mac -and $localMacs -contains $_.Mac })
+            if ($losing.Count -gt 0) {
+                throw ("В диапазоне $($b.Title) синхронизация удалила бы адрес этого компьютера " +
+                       "($($losing[0].Mac)), а белый список сейчас включён — доступ к роутеру пропал бы " +
+                       "сразу. Верните адрес в whitelist.json или запустите с ключом -Force.")
+            }
+        }
+    }
+
+    # --- удаление лишних, затем добавление недостающих --------------------
+    $removed = 0
+    $added   = 0
+    foreach ($b in $Bands) {
+        $st   = Get-BandState $b.Prefix
+        $want = @($wl[$b.Key].Mac)
+
+        # Удаление сдвигает номера позиций у всего, что идёт следом,
+        # поэтому идём с конца списка.
+        $extra = @($st.Rules | Where-Object { $want -notcontains $_.Mac } | Sort-Object Pos -Descending)
+        foreach ($e in $extra) {
+            Remove-BandRule $b.Prefix $e.Pos $e.Raw
+            $removed++
+        }
+
+        $have = @((Get-BandState $b.Prefix).Rules.Mac)
+        foreach ($e in $wl[$b.Key]) {
+            if ($have -notcontains $e.Mac) {
+                Add-BandRule $b.Prefix $e.Mac $e.Name
+                $added++
+            }
+        }
+    }
+
+    # --- отчёт по тому, что реально лежит на роутере ----------------------
+    $report = @('Списки на роутере приведены в соответствие с whitelist.json.', '')
+    foreach ($b in $Bands) {
+        $st = Get-BandState $b.Prefix
+        $report += "$($b.Title): записей $($st.Rules.Count), фильтр — $(Get-PolicyTitle $st.Policy)"
+        foreach ($r in $st.Rules) { $report += "     $($r.Mac)   $($r.Host)" }
+        $report += ''
+    }
+    $report += "Удалено: $removed, добавлено: $added"
+    Show-Message ($report -join [Environment]::NewLine) 'Белый список Wi-Fi' 'info'
+}
+
 function Invoke-Disable {
     foreach ($b in $Bands) { Set-BandPolicy $b.Prefix $POLICY_OFF }
 
@@ -296,6 +358,7 @@ try {
         'status' { Invoke-Status }
         'on'     { Invoke-Enable }
         'off'    { Invoke-Disable }
+        'sync'   { Invoke-Sync }
     }
     # Даже чтение сдвигает служебный курсор выбора сети. Без этой команды
     # роутер считает конфигурацию изменённой и просит сохранить её вручную.

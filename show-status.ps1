@@ -80,7 +80,7 @@ function Get-BlockState {
     if (Test-Path $DevFile) {
         $devices = Get-Content $DevFile -Raw -Encoding UTF8 | ConvertFrom-Json
         foreach ($p in $devices.PSObject.Properties) {
-            $aliases[([string]$p.Value).ToUpper().Replace('-', ':')] = $p.Name
+            $aliases[(ConvertTo-RouterMac $p.Value)] = $p.Name
         }
     }
 

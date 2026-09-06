@@ -68,7 +68,7 @@ function Get-Devices {
 
 function Resolve-Mac {
     param([string]$MacArg, [string]$NameArg)
-    if ($MacArg) { return $MacArg.ToUpper().Replace('-', ':') }
+    if ($MacArg) { return (ConvertTo-RouterMac $MacArg) }
     if ($NameArg) {
         $devices = Get-Devices
         if ($null -eq $devices) { throw 'No device list yet. Run: .\dlink-macfilter.ps1 setup' }
@@ -77,7 +77,7 @@ function Resolve-Mac {
             $known = ($devices.PSObject.Properties.Name) -join ', '
             throw "Unknown device name '$NameArg'. Known: $known"
         }
-        return ([string]$entry.Value).ToUpper().Replace('-', ':')
+        return (ConvertTo-RouterMac $entry.Value)
     }
     throw 'Specify -Mac <address> or -Name <alias>.'
 }
@@ -133,16 +133,6 @@ function New-Rule {
     return $new
 }
 
-function Get-LocalMacs {
-    $macs = @()
-    try {
-        $macs = @(Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction Stop |
-                  Where-Object { $_.MACAddress } |
-                  ForEach-Object { $_.MACAddress.ToUpper() })
-    } catch { }
-    return $macs
-}
-
 function Initialize-BaseRule {
     <#  The filter starts out completely empty -- not even a default-policy
         entry. The web UI writes that entry at position 0 before appending the
@@ -188,7 +178,7 @@ function Set-Block {
     param([string]$Target, [bool]$Blocked)
 
     if ($Blocked -and -not $Force) {
-        if ((Get-LocalMacs) -contains $Target) {
+        if ((Get-LocalMacAddresses) -contains $Target) {
             throw ("$Target is a network adapter of THIS computer. Blocking it would cut " +
                    "off your own access to the router. Re-run with -Force if you really mean it.")
         }

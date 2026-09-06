@@ -7,6 +7,10 @@
     one "toggle" shortcut. Double-click blocks the device; double-click
     again lets it back on the network.
 
+    Four more shortcuts are created alongside them: Devices (pick who to
+    block or whitelist), Status (read-only overview), Whitelist ON and
+    Whitelist OFF.
+
     Use -Mode block or -Mode unblock to make one-way shortcuts instead,
     and -Folder to put them somewhere other than the Desktop.
 
@@ -32,7 +36,12 @@ if (-not (Test-Path $DevFile)) { throw "devices.json not found in $PSScriptRoot.
 
 $devices = Get-Content $DevFile -Raw | ConvertFrom-Json
 $names   = @($devices.PSObject.Properties.Name)
-if ($names.Count -eq 0) { throw "No devices defined in $DevFile" }
+
+# An empty device list is not an error: the standalone shortcuts below are
+# still worth creating, and pick-devices.ps1 is how the list gets filled.
+if ($names.Count -eq 0) {
+    Write-Host "No devices defined in $DevFile yet; per-device shortcuts skipped." -ForegroundColor DarkYellow
+}
 
 if (-not (Test-Path $Folder)) { New-Item -ItemType Directory -Path $Folder | Out-Null }
 
@@ -67,6 +76,25 @@ if (Test-Path $StatusScript) {
     Write-Host "Created: $statusLnk" -ForegroundColor Green
 } else {
     Write-Host 'show-status.ps1 not found next to this script; status shortcut skipped.' -ForegroundColor DarkYellow
+}
+
+# Picker window: shows what the router currently sees and lets the user tick
+# devices into the block list and the Wi-Fi whitelist. This is how devices.json
+# gets filled in the first place, so the shortcut is worth having even when
+# there are no per-device shortcuts yet.
+$PickerScript = Join-Path $PSScriptRoot 'pick-devices.ps1'
+if (Test-Path $PickerScript) {
+    $pickLnk = Join-Path $Folder 'Devices.lnk'
+    $lnk = $shell.CreateShortcut($pickLnk)
+    $lnk.TargetPath       = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $lnk.Arguments        = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PickerScript`""
+    $lnk.WorkingDirectory = $PSScriptRoot
+    $lnk.Description      = 'Pick devices to block or to keep on the Wi-Fi whitelist'
+    $lnk.IconLocation     = "$env:SystemRoot\System32\shell32.dll,18"
+    $lnk.Save()
+    Write-Host "Created: $pickLnk" -ForegroundColor Green
+} else {
+    Write-Host 'pick-devices.ps1 not found next to this script; picker shortcut skipped.' -ForegroundColor DarkYellow
 }
 
 # Wi-Fi whitelist: two explicit shortcuts rather than one toggle, so it is
