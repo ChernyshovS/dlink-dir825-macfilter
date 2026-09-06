@@ -344,9 +344,18 @@ $form.Controls.Add($lblFirewall)
 
 $lblWifi = New-Object System.Windows.Forms.Label
 $lblWifi.Location = New-Object System.Drawing.Point(14, 32)
-$lblWifi.Size     = New-Object System.Drawing.Size(900, 20)
-$lblWifi.Anchor   = 'Top,Left,Right'
+$lblWifi.Size     = New-Object System.Drawing.Size(690, 20)
+$lblWifi.Anchor   = 'Top,Left'
 $form.Controls.Add($lblWifi)
+
+# Кнопка одна и меняет надпись по состоянию. Двумя ярлыками это делалось
+# потому, что состояние было не видно и легко было нажать не в ту сторону;
+# здесь оно написано прямо слева от кнопки.
+$btnWhitelist = New-Object System.Windows.Forms.Button
+$btnWhitelist.Location = New-Object System.Drawing.Point(714, 29)
+$btnWhitelist.Size     = New-Object System.Drawing.Size(200, 26)
+$btnWhitelist.Anchor   = 'Top,Right'
+$form.Controls.Add($btnWhitelist)
 
 $lblHint = New-Object System.Windows.Forms.Label
 $lblHint.Location = New-Object System.Drawing.Point(14, 58)
@@ -407,7 +416,7 @@ $lblLegend.Size      = New-Object System.Drawing.Size(900, 60)
 $lblLegend.Anchor    = 'Bottom,Left,Right'
 $lblLegend.ForeColor = [System.Drawing.Color]::Gray
 $lblLegend.Text      = ('Красным — случайные адреса: устройство меняет их при переподключении, и правило перестаёт действовать.' + [Environment]::NewLine +
-                       'Галочки белого списка действуют, только когда он включён; включают и выключают его отдельные ярлыки.' + [Environment]::NewLine +
+                       'Галочки белого списка действуют, только когда он включён — кнопка справа сверху.' + [Environment]::NewLine +
                        '«Не отвечает» — роутер помнит устройство, но связь не подтверждена: обычно оно только что отключилось.')
 $form.Controls.Add($lblLegend)
 
@@ -460,7 +469,12 @@ $script:LastLink = @{}
 # когда предупреждение больше не нужно.
 $script:LastRefreshText = ''
 
+# Включать белый список поверх несохранённых галочек нельзя: подействует
+# старый файл, а не то, что человек видит на экране.
+$script:Dirty = $false
+
 function Set-DirtyState([bool]$On) {
+    $script:Dirty = $On
     if ($On) {
         $lblTime.Text      = 'Изменения не сохранены — нажмите «Применить»'
         $lblTime.ForeColor = $colorWarn
@@ -483,12 +497,15 @@ function Update-View {
         $lblFirewall.Text = "Межсетевой экран: $($script:Summary.Firewall)"
         $lblWifi.Text     = "Белый список Wi-Fi: $($script:Summary.WifiText)"
         if ($script:Summary.WifiOn) {
-            $lblWifi.ForeColor = $colorWarn
-            $lblWifi.Font      = $fontBold
+            $lblWifi.ForeColor    = $colorWarn
+            $lblWifi.Font         = $fontBold
+            $btnWhitelist.Text    = 'Выключить белый список'
         } else {
-            $lblWifi.ForeColor = $colorOk
-            $lblWifi.Font      = $form.Font
+            $lblWifi.ForeColor    = $colorOk
+            $lblWifi.Font         = $form.Font
+            $btnWhitelist.Text    = 'Включить белый список'
         }
+        $btnWhitelist.Enabled = (Test-Path $WhitelistScript)
 
         $grid.Rows.Clear()
         foreach ($r in $inventory) {
@@ -740,6 +757,42 @@ function Invoke-Apply {
     Update-View
 }
 
+function Invoke-WhitelistToggle {
+    <#  Включение и выключение белого списка Wi-Fi. Всю работу и все проверки
+        делает wifi-whitelist.ps1: он же покажет, кто сохранит доступ, и
+        откажется включать список, в котором нет адреса этого компьютера. #>
+    if ($null -eq $script:Summary) { return }
+
+    if ($script:Dirty) {
+        [System.Windows.Forms.MessageBox]::Show(
+            'В таблице есть несохранённые изменения. Сначала нажмите «Применить», иначе список включится в том виде, в каком он был до правок.',
+            'Сначала сохраните', [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    $action = 'on'
+    if ($script:Summary.WifiOn) { $action = 'off' }
+
+    $form.Cursor          = 'WaitCursor'
+    $btnWhitelist.Enabled = $false
+    try {
+        & $WhitelistScript $action -Router $Router -User $User | Out-Null
+    }
+    catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Белый список Wi-Fi',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    }
+    finally {
+        $btnWhitelist.Enabled = $true
+        $form.Cursor          = 'Default'
+    }
+
+    Update-View
+}
+
+$btnWhitelist.Add_Click({ Invoke-WhitelistToggle })
 $btnRefresh.Add_Click({ Update-View })
 $btnApply.Add_Click({ Invoke-Apply })
 $form.Add_Shown({ $form.Activate(); Update-View })

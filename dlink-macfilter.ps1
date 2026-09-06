@@ -31,7 +31,10 @@ param(
     [string]$User   = 'admin',
 
     # Allow blocking a MAC that belongs to this computer (normally refused).
-    [switch]$Force
+    [switch]$Force,
+
+    # setup only: skip creating the desktop shortcut for the picker window.
+    [switch]$NoShortcut
 )
 
 $ErrorActionPreference = 'Stop'
@@ -59,6 +62,31 @@ function Get-StoredCredential {
         Write-Host "Saved to $CredFile" -ForegroundColor Green
     }
     Import-Clixml -Path $CredFile
+}
+
+function New-PickerShortcut {
+    <#  One desktop shortcut, created once at setup: the picker window is the
+        way this tool is normally used, and everything else lives inside it.
+
+        -ExecutionPolicy Bypass is baked in, so the shortcut works on a
+        machine where scripts are otherwise disallowed. -WindowStyle Hidden
+        keeps the console out of the way -- only the window shows. #>
+    $picker = Join-Path $PSScriptRoot 'pick-devices.ps1'
+    if (-not (Test-Path $picker)) {
+        Write-Host 'pick-devices.ps1 not found next to this script; shortcut skipped.' -ForegroundColor DarkYellow
+        return
+    }
+
+    $lnkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Devices.lnk'
+    $shell = New-Object -ComObject WScript.Shell
+    $lnk = $shell.CreateShortcut($lnkPath)
+    $lnk.TargetPath       = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $lnk.Arguments        = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$picker`""
+    $lnk.WorkingDirectory = $PSScriptRoot
+    $lnk.Description      = 'Pick devices to block or to keep on the Wi-Fi whitelist'
+    $lnk.IconLocation     = "$env:SystemRoot\System32\shell32.dll,18"
+    $lnk.Save()
+    Write-Host "Shortcut created: $lnkPath" -ForegroundColor Green
 }
 
 function Get-Devices {
@@ -230,10 +258,10 @@ switch ($Action) {
         if (-not (Test-Path $DevFile)) {
             @{ example = 'AA:BB:CC:DD:EE:01' } | ConvertTo-Json | Set-Content -Path $DevFile -Encoding UTF8
         }
+        if (-not $NoShortcut) { New-PickerShortcut }
         Write-Host ''
         Write-Host "Device aliases file: $DevFile"
-        Write-Host 'Edit it to map friendly names to MAC addresses, e.g.'
-        Write-Host '  { "tv": "AA:BB:CC:DD:EE:01", "kids": "AA:BB:CC:DD:EE:FF" }'
+        Write-Host 'It only holds display names; you normally fill it from the picker window.'
         Write-Host ''
         Write-Host 'Then check the connection with:  .\dlink-macfilter.ps1 status'
     }
