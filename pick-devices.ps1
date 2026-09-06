@@ -86,6 +86,7 @@ function Get-Slot($Map, [string]$Mac) {
             Online      = $false
             Seen        = $false
             Blocked     = $false
+            HasRule     = $false
             InDevices   = $false
             InWhitelist = $false
             WlBand      = 'both'
@@ -191,6 +192,9 @@ function Get-DeviceInventory {
     foreach ($f in @($fw.macfilter)) {
         if ($null -eq $f.mac) { continue }
         $r = Get-Slot $map $f.mac
+        # Правило может существовать выключенным: разблокировка его гасит,
+        # а не удаляет. Для уборки списков важно именно наличие.
+        $r.HasRule = $true
         $r.Blocked = ([bool]$f.state) -and ($f.enable -eq 'DROP')
     }
 
@@ -422,6 +426,35 @@ Add-GridColumn 'Белый список Wi-Fi' 130 $true  $false
 # сжатии окна столбец не схлопнулся в ничто.
 $grid.Columns[$COL_NAME].AutoSizeMode = 'Fill'
 $grid.Columns[$COL_NAME].MinimumWidth = 110
+
+# Удаление — действие редкое и необратимое, поэтому оно не в галочках, а по
+# правой кнопке: промахнуться мимо галочки легко, мимо пункта меню трудно.
+# Нужно оно тем, у кого адреса плодятся: телефон с рандомизацией оставляет
+# после себя мёртвый адрес всякий раз, когда сменит его.
+$script:MenuRow = $null
+
+$gridMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$miForget = $gridMenu.Items.Add('Убрать устройство из списков')
+$grid.ContextMenuStrip = $gridMenu
+
+# Правый щелчок сам по себе строку не выбирает — запоминаем, по какой попали.
+$grid.Add_CellMouseDown({
+    param($sender, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right -and $e.RowIndex -ge 0) {
+        $script:MenuRow = $grid.Rows[$e.RowIndex]
+        # Ставим текущей ячейкой адрес, а не имя: имя редактируемое, и фокус
+        # на нём открыл бы правку прямо под контекстным меню.
+        $grid.CurrentCell = $script:MenuRow.Cells[$COL_MAC]
+    }
+})
+
+$gridMenu.Add_Opening({
+    if ($script:MenuRow -and $script:MenuRow.Tag) {
+        $miForget.Text = "Убрать «$($script:MenuRow.Cells[$COL_NAME].Value)» из списков"
+    } else {
+        $miForget.Text = 'Убрать устройство из списков'
+    }
+})
 
 $lblLegend = New-Object System.Windows.Forms.Label
 $lblLegend.Location  = New-Object System.Drawing.Point(14, 505)
@@ -807,6 +840,104 @@ function Invoke-WhitelistToggle {
     Update-View
 }
 
+function Invoke-ForgetDevice {
+    <#  Убирает устройство отовсюду, где о нём что-то записано: из реестра
+        имён, из белого списка (и с роутера вместе с ним) и из правил
+        межсетевого экрана.
+
+        Отличается от снятия галочек тем, что запись исчезает, а не гаснет.
+        Нужно для адресов, которые уже не вернутся: устройство с
+        рандомизацией MAC оставляет мёртвый адрес при каждой смене. #>
+    if (-not $script:MenuRow -or -not $script:MenuRow.Tag) { return }
+    $r = $script:MenuRow.Tag
+
+    if ($script:Dirty) {
+        [System.Windows.Forms.MessageBox]::Show(
+            'В таблице есть несохранённые изменения. Сначала нажмите «Применить» или «Обновить».',
+            'Сначала разберитесь с правками', [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    $where = @()
+    if ($r.InDevices)   { $where += '  имя в devices.json' }
+    if ($r.InWhitelist) { $where += '  запись в белом списке — и в файле, и на роутере' }
+    if ($r.HasRule)     { $where += '  правило межсетевого экрана' }
+
+    if ($where.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Про $($r.Mac) нигде ничего не записано — убирать нечего. Строка исчезнет из таблицы сама, когда роутер забудет об этом адресе.",
+            'Нечего убирать', [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        return
+    }
+
+    $lines = @("Убрать «$($r.Alias)» ($($r.Mac))?", '', 'Будет удалено:') + $where
+    if ($r.Online -or $r.Seen) {
+        $lines += ''
+        $lines += 'Учтите: устройство сейчас в сети, и после уборки оно снова появится в таблице — уже без имени и без отметок.'
+    }
+    $lines += ''
+    $lines += 'Отменить это будет нельзя.'
+
+    $answer = [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine),
+        'Убрать из списков', [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+    $form.Cursor = 'WaitCursor'
+    $report = @()
+    try {
+        if ($r.HasRule) {
+            & $MainScript remove -Mac $r.Mac -Router $Router -User $User | Out-Null
+            $report += 'Правило межсетевого экрана удалено.'
+        }
+
+        # Файлы пересобираем из таблицы: правок в ней нет, значит она сейчас
+        # в точности повторяет содержимое файлов.
+        $aliases = @()
+        $white   = @()
+        foreach ($row in $grid.Rows) {
+            $x = $row.Tag
+            if (-not $x -or $x.Mac -eq $r.Mac) { continue }
+            if ($x.InDevices)   { $aliases += [pscustomobject]@{ Alias = $x.Alias; Mac = $x.Mac } }
+            if ($x.InWhitelist) { $white   += [pscustomobject]@{ Alias = $x.Alias; Mac = $x.Mac; Band = $x.WlBand } }
+        }
+
+        if ($r.InDevices) {
+            Save-DeviceAliases $aliases
+            $report += "devices.json: осталось записей $($aliases.Count)."
+        }
+        if ($r.InWhitelist) {
+            Save-Whitelist $white
+            $report += "whitelist.json: осталось записей $($white.Count)."
+            if (Test-Path $WhitelistScript) {
+                $syncLog = & $WhitelistScript sync -Text -Router $Router -User $User 2>&1 | Out-String
+                $report += ''
+                $report += $syncLog.Trim()
+            }
+        }
+
+        [System.Windows.Forms.MessageBox]::Show(($report -join [Environment]::NewLine),
+            'Убрано', [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+    }
+    catch {
+        $body = $_.Exception.Message
+        if ($report.Count -gt 0) {
+            $body = ($report -join [Environment]::NewLine) + [Environment]::NewLine + [Environment]::NewLine +
+                    'Дальше произошла ошибка:' + [Environment]::NewLine + $body
+        }
+        [System.Windows.Forms.MessageBox]::Show($body, 'Ошибка',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    }
+    finally { $form.Cursor = 'Default' }
+
+    Update-View
+}
+
+$miForget.Add_Click({ Invoke-ForgetDevice })
 $btnWhitelist.Add_Click({ Invoke-WhitelistToggle })
 $btnRefresh.Add_Click({ Update-View })
 $btnApply.Add_Click({ Invoke-Apply })

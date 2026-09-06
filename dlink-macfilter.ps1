@@ -18,11 +18,12 @@
     .\dlink-macfilter.ps1 block   -Mac AA:BB:CC:DD:EE:01
     .\dlink-macfilter.ps1 unblock -Name tv
     .\dlink-macfilter.ps1 toggle  -Name tv
+    .\dlink-macfilter.ps1 remove  -Mac AA:BB:CC:DD:EE:01
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status', 'block', 'unblock', 'toggle', 'dump', 'setup')]
+    [ValidateSet('status', 'block', 'unblock', 'toggle', 'dump', 'setup', 'remove')]
     [string]$Action = 'status',
 
     [string]$Mac,
@@ -202,6 +203,32 @@ function Show-Status {
     }
 }
 
+function Remove-Rule {
+    <#  Deletes a rule outright, unlike unblock, which only switches it off.
+
+        Switching off is the right default: re-blocking then costs one
+        request and the history stays visible. Deletion is for entries that
+        will never come back -- a phone with MAC randomisation leaves a new
+        dead address behind every time it changes one. #>
+    param([string]$Target)
+
+    $filter = Read-MacFilter
+    $idx    = Find-RuleIndex -Filter $filter -Target $Target
+    if ($idx -lt 0) {
+        Write-Host "$Target has no rule -- nothing to remove." -ForegroundColor DarkGray
+        return
+    }
+    # Entry 0 carries the default policy rather than a device. Find-RuleIndex
+    # already skips it, but deleting it would silently change how the whole
+    # filter behaves, so refuse explicitly.
+    if ($null -eq $filter[$idx].mac) {
+        throw 'Refusing to delete the default-policy entry.'
+    }
+
+    Remove-RouterConfig -Id $CONFIG_ID -Data $filter[$idx] -Pos $idx | Out-Null
+    Write-Host "REMOVED  $Target" -ForegroundColor Yellow
+}
+
 function Set-Block {
     param([string]$Target, [bool]$Blocked)
 
@@ -269,6 +296,10 @@ switch ($Action) {
     'dump' {
         $r = Invoke-RouterRpc @{ jsonrpc = '2.0'; method = 'read'; params = @{ id = $CONFIG_ID }; id = 1 }
         $r | ConvertTo-Json -Depth 25
+    }
+
+    'remove' {
+        Remove-Rule -Target (Resolve-Mac -MacArg $Mac -NameArg $Name)
     }
 
     'status' {
