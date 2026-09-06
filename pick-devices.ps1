@@ -109,7 +109,13 @@ function Get-DeviceInventory {
         $r = Get-Slot $map $c.mac
         if ($c.hostname) { $r.Hostname = [string]$c.hostname }
         if ($c.ip -and ([string]$c.ip) -notmatch ':') { $r.Ip = [string]$c.ip }
-        if ([string]$c.flags -match 'reachable') { $r.Online = $true }
+
+        # Присутствие в этом списке и означает «в сети». Флаг stale говорит
+        # только о том, что устройство давно не отвечало: тихий компьютер на
+        # кабеле уходит в stale, оставаясь подключённым. Отключённое
+        # устройство пропадает из списка целиком.
+        $r.Online = $true
+
         if ($c.name -eq 'WLAN') { $r.Wireless = $true }
         elseif ($c.name)        { $r.Wired    = $true }
     }
@@ -413,7 +419,8 @@ function Test-GridState($Items) {
     $errors = @()
     $seen   = @{}
     foreach ($e in $Items) {
-        $needsName = $e.Block -or $e.White -or $e.Row.InDevices -or $e.Row.InWhitelist
+        $needsName = $e.Block -or $e.White -or $e.Row.InDevices -or $e.Row.InWhitelist -or
+                     ($e.Alias -ne $e.Row.Alias)
         if (-not $needsName) { continue }
         if (-not $e.Alias) {
             $errors += "У устройства $($e.Row.Mac) пустое имя."
@@ -447,7 +454,7 @@ function Invoke-Apply {
     $blockOff = @($items | Where-Object { -not $_.Block -and $_.Row.Blocked })
     $wlOn     = @($items | Where-Object { $_.White -and -not $_.Row.InWhitelist })
     $wlOff    = @($items | Where-Object { -not $_.White -and $_.Row.InWhitelist })
-    $renamed  = @($items | Where-Object { $_.Alias -ne $_.Row.Alias -and ($_.Row.InDevices -or $_.Block) })
+    $renamed  = @($items | Where-Object { $_.Alias -ne $_.Row.Alias })
 
     if ($blockOn.Count + $blockOff.Count + $wlOn.Count + $wlOff.Count + $renamed.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show('Ничего не изменено.', 'Устройства в сети',
@@ -502,11 +509,12 @@ function Invoke-Apply {
     $btnRefresh.Enabled = $false
     $report = @()
     try {
-        # Имена: в devices.json попадают те, кто там уже был, и те, кого
-        # сейчас блокируют — именно для них имеет смысл ярлык.
+        # devices.json — это реестр имён. В него попадают те, кто там уже
+        # был, те, кого сейчас блокируют, и те, кому пользователь вписал имя
+        # руками: раз имя набрано, его надо запомнить.
         $aliasEntries = @()
         foreach ($e in $items) {
-            if ($e.Row.InDevices -or $e.Block) {
+            if ($e.Row.InDevices -or $e.Block -or ($e.Alias -ne $e.Row.Alias)) {
                 $aliasEntries += [pscustomobject]@{ Alias = $e.Alias; Mac = $e.Row.Mac }
             }
         }
