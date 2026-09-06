@@ -253,8 +253,10 @@ function Remove-RouterConfig {
         same container a matching Write-RouterConfig call would use, Pos is
         the entry's own key inside that container.
 
-        Removing shifts the keys of everything after it, so when deleting
-        several entries, work from the highest position downwards. #>
+        Those keys are stable ids, not array indices: deleting one leaves the
+        others where they were, freed numbers are never handed out again, and
+        a new entry gets the next number from a counter. So read the key from
+        the container rather than counting entries, and delete in any order. #>
     param(
         [Parameter(Mandatory = $true)][int]$Id,
         [Parameter(Mandatory = $true)]$Data,

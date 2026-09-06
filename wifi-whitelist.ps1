@@ -309,8 +309,9 @@ function Invoke-Sync {
         $st   = Get-BandState $b.Prefix
         $want = @($wl[$b.Key].Mac)
 
-        # Удаление сдвигает номера позиций у всего, что идёт следом,
-        # поэтому идём с конца списка.
+        # Номера позиций устойчивы: удаление одной записи не сдвигает
+        # остальные, так что порядок не важен. С конца — просто на случай,
+        # если другая прошивка поведёт себя иначе.
         $extra = @($st.Rules | Where-Object { $want -notcontains $_.Mac } | Sort-Object Pos -Descending)
         foreach ($e in $extra) {
             Remove-BandRule $b.Prefix $e.Pos $e.Raw
