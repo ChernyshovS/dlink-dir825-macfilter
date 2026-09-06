@@ -43,6 +43,7 @@ if (-not (Test-Path $MainScript)) { throw "Рядом со скриптом не
 Initialize-RouterApi -Router $Router -User $User -CredFile $CredFile
 
 $CFG_FIREWALL = 74   # MAC-фильтр межсетевого экрана: и Wi-Fi, и витая пара
+$CFG_WIFI     = 42   # политика белых списков Wi-Fi по диапазонам
 
 # ------------------------------------------------------------------ данные ---
 
@@ -92,6 +93,50 @@ function Get-Slot($Map, [string]$Mac) {
         }
     }
     return $Map[$key]
+}
+
+# Сводка о режимах фильтрации: то, ради чего раньше открывали отдельное
+# окно статуса. Складывается из уже прочитанной конфигурации 74 и одного
+# дополнительного чтения конфигурации 42.
+$script:Summary = $null
+
+function Set-StateSummary($Firewall) {
+    # Политика межсетевого экрана — нулевой элемент списка, у него нет
+    # адреса. Он же решает, чёрный это список или белый.
+    $base = @($Firewall.macfilter) | Where-Object { $null -eq $_.mac } | Select-Object -First 1
+    if ($base -and $base.state) {
+        $fwText = 'запрещать всё, кроме исключений (белый список)'
+    } elseif ($base) {
+        $fwText = 'разрешать всё, кроме исключений (чёрный список)'
+    } else {
+        $fwText = 'разрешать всё — фильтр ещё не настроен'
+    }
+
+    # Белые списки Wi-Fi. Курсор выбора сети при чтении не нужен: ответ
+    # одинаков с ним и без него, а лишняя запись изнашивала бы флеш-память
+    # и оставляла бы на роутере флаг «конфигурация изменена».
+    $wifi    = Read-RouterConfig -Id $CFG_WIFI
+    $onBands = @()
+    $listed  = 0
+    foreach ($b in @(@{ P = ''; T = '2,4 ГГц' }, @{ P = '5G_'; T = '5 ГГц' })) {
+        if ([int]$wifi."$($b.P)AccessPolicy" -eq 1) { $onBands += $b.T }
+        $lst = $wifi."$($b.P)MacFilterList"
+        if ($lst) {
+            $listed += @($lst.PSObject.Properties | Where-Object { $_.Name -ne 'max_instance' }).Count
+        }
+    }
+
+    if ($onBands.Count -gt 0) {
+        $wlText = "ВКЛЮЧЁН ($($onBands -join ' и ')) — к Wi-Fi пускает только отмеченных, записей $listed"
+    } else {
+        $wlText = 'выключен — Wi-Fi открыт для всех'
+    }
+
+    $script:Summary = [pscustomobject]@{
+        Firewall = $fwText
+        WifiOn   = ($onBands.Count -gt 0)
+        WifiText = $wlText
+    }
 }
 
 function Get-DeviceInventory {
@@ -148,6 +193,8 @@ function Get-DeviceInventory {
         $r = Get-Slot $map $f.mac
         $r.Blocked = ([bool]$f.state) -and ($f.enable -eq 'DROP')
     }
+
+    Set-StateSummary $fw
 
     # Имена из devices.json.
     if (Test-Path $DevFile) {
@@ -236,6 +283,14 @@ function Save-Whitelist($Entries) {
 if ($Text) {
     $inv = Get-DeviceInventory
     Write-Host ''
+    Write-Host "Межсетевой экран:   $($script:Summary.Firewall)"
+    Write-Host 'Белый список Wi-Fi: ' -NoNewline
+    if ($script:Summary.WifiOn) {
+        Write-Host $script:Summary.WifiText -ForegroundColor Red
+    } else {
+        Write-Host $script:Summary.WifiText -ForegroundColor Green
+    }
+    Write-Host ''
     Write-Host ('{0,-20} {1,-19} {2,-14} {3,-11} {4,-16} {5}' -f `
                 'Имя', 'MAC-адрес', 'Подключение', 'Состояние', 'IP-адрес', 'Списки')
     Write-Host ('-' * 105)
@@ -266,19 +321,35 @@ $COL_IP    = 4
 $COL_BLOCK = 5
 $COL_WHITE = 6
 
+$colorOk       = [System.Drawing.Color]::FromArgb(34, 120, 34)
 $colorWarn     = [System.Drawing.Color]::FromArgb(178, 34, 34)
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text          = 'Устройства в сети'
-$form.Size          = New-Object System.Drawing.Size(940, 645)
+$form.Size          = New-Object System.Drawing.Size(940, 680)
 $form.StartPosition = 'CenterScreen'
 $form.Font          = New-Object System.Drawing.Font('Segoe UI', 9.5)
-$form.MinimumSize   = New-Object System.Drawing.Size(860, 520)
+$form.MinimumSize   = New-Object System.Drawing.Size(860, 560)
 
 $fontBold = New-Object System.Drawing.Font($form.Font, [System.Drawing.FontStyle]::Bold)
 
+# Два режима фильтрации, каждый со своим смыслом: межсетевой экран режет
+# интернет отмеченным устройствам, белый список Wi-Fi не пускает в сеть
+# неотмеченные. Раньше это показывало отдельное окно.
+$lblFirewall = New-Object System.Windows.Forms.Label
+$lblFirewall.Location = New-Object System.Drawing.Point(14, 10)
+$lblFirewall.Size     = New-Object System.Drawing.Size(900, 20)
+$lblFirewall.Anchor   = 'Top,Left,Right'
+$form.Controls.Add($lblFirewall)
+
+$lblWifi = New-Object System.Windows.Forms.Label
+$lblWifi.Location = New-Object System.Drawing.Point(14, 32)
+$lblWifi.Size     = New-Object System.Drawing.Size(900, 20)
+$lblWifi.Anchor   = 'Top,Left,Right'
+$form.Controls.Add($lblWifi)
+
 $lblHint = New-Object System.Windows.Forms.Label
-$lblHint.Location = New-Object System.Drawing.Point(14, 10)
+$lblHint.Location = New-Object System.Drawing.Point(14, 58)
 $lblHint.Size     = New-Object System.Drawing.Size(900, 40)
 $lblHint.Anchor   = 'Top,Left,Right'
 $lblHint.Text     = ('Отметьте, кого заблокировать и кого держать в белом списке Wi-Fi, затем нажмите «Применить».' + [Environment]::NewLine +
@@ -286,8 +357,8 @@ $lblHint.Text     = ('Отметьте, кого заблокировать и �
 $form.Controls.Add($lblHint)
 
 $grid = New-Object System.Windows.Forms.DataGridView
-$grid.Location = New-Object System.Drawing.Point(14, 54)
-$grid.Size     = New-Object System.Drawing.Size(900, 410)
+$grid.Location = New-Object System.Drawing.Point(14, 102)
+$grid.Size     = New-Object System.Drawing.Size(900, 397)
 $grid.Anchor   = 'Top,Left,Right,Bottom'
 $grid.AllowUserToAddRows          = $false
 $grid.AllowUserToDeleteRows       = $false
@@ -331,12 +402,12 @@ $grid.Columns[$COL_NAME].AutoSizeMode = 'Fill'
 $grid.Columns[$COL_NAME].MinimumWidth = 110
 
 $lblLegend = New-Object System.Windows.Forms.Label
-$lblLegend.Location  = New-Object System.Drawing.Point(14, 470)
+$lblLegend.Location  = New-Object System.Drawing.Point(14, 505)
 $lblLegend.Size      = New-Object System.Drawing.Size(900, 60)
 $lblLegend.Anchor    = 'Bottom,Left,Right'
 $lblLegend.ForeColor = [System.Drawing.Color]::Gray
 $lblLegend.Text      = ('Красным — случайные адреса: устройство меняет их при переподключении, и правило перестаёт действовать.' + [Environment]::NewLine +
-                       'Белый список работает только по Wi-Fi и только когда он включён; его состояние показывает окно «Статус».' + [Environment]::NewLine +
+                       'Галочки белого списка действуют, только когда он включён; включают и выключают его отдельные ярлыки.' + [Environment]::NewLine +
                        '«Не отвечает» — роутер помнит устройство, но связь не подтверждена: обычно оно только что отключилось.')
 $form.Controls.Add($lblLegend)
 
@@ -346,7 +417,7 @@ $form.Controls.Add($lblLegend)
 # кнопки. Высоты хватает на две строки, поэтому длинный текст переносится,
 # а не обрезается.
 $lblTime = New-Object System.Windows.Forms.Label
-$lblTime.Location  = New-Object System.Drawing.Point(14, 536)
+$lblTime.Location  = New-Object System.Drawing.Point(14, 571)
 $lblTime.Size      = New-Object System.Drawing.Size(430, 40)
 $lblTime.Anchor    = 'Bottom,Left'
 $lblTime.ForeColor = [System.Drawing.Color]::Gray
@@ -354,21 +425,21 @@ $form.Controls.Add($lblTime)
 
 $btnRefresh = New-Object System.Windows.Forms.Button
 $btnRefresh.Text     = 'Обновить'
-$btnRefresh.Location = New-Object System.Drawing.Point(624, 540)
+$btnRefresh.Location = New-Object System.Drawing.Point(624, 575)
 $btnRefresh.Size     = New-Object System.Drawing.Size(90, 28)
 $btnRefresh.Anchor   = 'Bottom,Right'
 $form.Controls.Add($btnRefresh)
 
 $btnApply = New-Object System.Windows.Forms.Button
 $btnApply.Text     = 'Применить'
-$btnApply.Location = New-Object System.Drawing.Point(720, 540)
+$btnApply.Location = New-Object System.Drawing.Point(720, 575)
 $btnApply.Size     = New-Object System.Drawing.Size(100, 28)
 $btnApply.Anchor   = 'Bottom,Right'
 $form.Controls.Add($btnApply)
 
 $btnClose = New-Object System.Windows.Forms.Button
 $btnClose.Text     = 'Закрыть'
-$btnClose.Location = New-Object System.Drawing.Point(826, 540)
+$btnClose.Location = New-Object System.Drawing.Point(826, 575)
 $btnClose.Size     = New-Object System.Drawing.Size(88, 28)
 $btnClose.Anchor   = 'Bottom,Right'
 $btnClose.Add_Click({ $form.Close() })
@@ -408,6 +479,17 @@ function Update-View {
     $script:Loading     = $true
     try {
         $inventory = Get-DeviceInventory
+
+        $lblFirewall.Text = "Межсетевой экран: $($script:Summary.Firewall)"
+        $lblWifi.Text     = "Белый список Wi-Fi: $($script:Summary.WifiText)"
+        if ($script:Summary.WifiOn) {
+            $lblWifi.ForeColor = $colorWarn
+            $lblWifi.Font      = $fontBold
+        } else {
+            $lblWifi.ForeColor = $colorOk
+            $lblWifi.Font      = $form.Font
+        }
+
         $grid.Rows.Clear()
         foreach ($r in $inventory) {
             $link      = Get-LinkText $r
@@ -451,6 +533,10 @@ function Update-View {
         $script:LastRefreshText = "Обновлено: $(Get-Date -Format 'HH:mm:ss') · устройств: $($inventory.Count)"
     }
     catch {
+        $lblFirewall.Text = 'Межсетевой экран: неизвестно'
+        $lblWifi.Text     = 'Белый список Wi-Fi: неизвестно'
+        $lblWifi.ForeColor = [System.Drawing.Color]::Gray
+        $lblWifi.Font      = $form.Font
         $script:LastRefreshText = 'Не удалось получить данные'
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Ошибка связи с роутером',
             [System.Windows.Forms.MessageBoxButtons]::OK,

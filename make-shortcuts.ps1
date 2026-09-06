@@ -61,23 +61,6 @@ foreach ($name in $names) {
     Write-Host "Created: $lnkPath" -ForegroundColor Green
 }
 
-# One extra shortcut that only shows what is currently blocked.
-# -WindowStyle Hidden keeps the console out of the way: only the window shows.
-$StatusScript = Join-Path $PSScriptRoot 'show-status.ps1'
-if (Test-Path $StatusScript) {
-    $statusLnk = Join-Path $Folder 'Status.lnk'
-    $lnk = $shell.CreateShortcut($statusLnk)
-    $lnk.TargetPath       = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $lnk.Arguments        = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StatusScript`""
-    $lnk.WorkingDirectory = $PSScriptRoot
-    $lnk.Description      = 'Show which devices are currently blocked on the router'
-    $lnk.IconLocation     = "$env:SystemRoot\System32\shell32.dll,23"
-    $lnk.Save()
-    Write-Host "Created: $statusLnk" -ForegroundColor Green
-} else {
-    Write-Host 'show-status.ps1 not found next to this script; status shortcut skipped.' -ForegroundColor DarkYellow
-}
-
 # Picker window: shows what the router currently sees and lets the user tick
 # devices into the block list and the Wi-Fi whitelist. This is how devices.json
 # gets filled in the first place, so the shortcut is worth having even when
