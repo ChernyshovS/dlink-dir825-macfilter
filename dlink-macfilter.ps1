@@ -282,8 +282,11 @@ switch ($Action) {
 
     'setup' {
         Get-StoredCredential | Out-Null
+        # An empty object, not a sample entry: the picker window reads this
+        # file as a list of devices, so the sample turned up there as a row
+        # for a device that does not exist and never will.
         if (-not (Test-Path $DevFile)) {
-            @{ example = 'AA:BB:CC:DD:EE:01' } | ConvertTo-Json | Set-Content -Path $DevFile -Encoding UTF8
+            '{}' | Set-Content -Path $DevFile -Encoding UTF8
         }
         if (-not $NoShortcut) { New-PickerShortcut }
         Write-Host ''
