@@ -336,12 +336,30 @@ $form.Font          = New-Object System.Drawing.Font('Segoe UI', 9.5)
 # Желаемый размер — 940x680, но на маленьком экране окно не должно
 # оказаться больше рабочей области: заголовок ушёл бы за верхнюю кромку,
 # а нижние кнопки скрылись бы за панелью задач. Нижнюю границу тоже
-# приходится опускать, иначе она не даст окну ужаться до экрана.
+# приходится опускать, иначе она не даст окну ужаться до экрана, — и
+# следить, чтобы желаемый размер не оказался меньше самой этой границы.
 $work = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$form.MinimumSize = New-Object System.Drawing.Size(
-    [Math]::Min(860, $work.Width), [Math]::Min(560, $work.Height))
+$minW = [Math]::Min(860, $work.Width)
+$minH = [Math]::Min(560, $work.Height)
+$form.MinimumSize = New-Object System.Drawing.Size($minW, $minH)
 $form.Size = New-Object System.Drawing.Size(
-    [Math]::Min(940, $work.Width - 20), [Math]::Min(680, $work.Height - 20))
+    [Math]::Max($minW, [Math]::Min(940, $work.Width - 20)),
+    [Math]::Max($minH, [Math]::Min(680, $work.Height - 20)))
+
+# Раскладка считается от фактических размеров клиентской области, а не от
+# желаемых. Привязка Anchor тут не помощник: она хранит расстояние до края
+# таким, каким оно было в момент добавления элемента, а размер окна задан
+# раньше, чем добавлены элементы, — на ужатом окне нижний ряд создавался
+# сразу за кромкой и там же оставался при любом изменении размера.
+# При 940x680 все числа ниже совпадают с прежними; на 1366x768 при 125%
+# по высоте остаётся около 574 вместо нужных 641 — не хватало 120 точек.
+$clientW    = $form.ClientSize.Width
+$clientH    = $form.ClientSize.Height
+$rowTime    = $clientH - 70   # строка состояния: две строки текста и отступ
+$rowButtons = $rowTime + 4
+$rowLegend  = $rowTime - 66   # три строки пояснений над ней
+$gridTop    = 102
+$gridHeight = [Math]::Max(120, $rowLegend - $gridTop - 6)
 
 $fontBold = New-Object System.Drawing.Font($form.Font, [System.Drawing.FontStyle]::Bold)
 
@@ -350,13 +368,13 @@ $fontBold = New-Object System.Drawing.Font($form.Font, [System.Drawing.FontStyle
 # неотмеченные. Раньше это показывало отдельное окно.
 $lblFirewall = New-Object System.Windows.Forms.Label
 $lblFirewall.Location = New-Object System.Drawing.Point(14, 10)
-$lblFirewall.Size     = New-Object System.Drawing.Size(900, 20)
+$lblFirewall.Size     = New-Object System.Drawing.Size(($clientW - 24), 20)
 $lblFirewall.Anchor   = 'Top,Left,Right'
 $form.Controls.Add($lblFirewall)
 
 $lblWifi = New-Object System.Windows.Forms.Label
 $lblWifi.Location = New-Object System.Drawing.Point(14, 32)
-$lblWifi.Size     = New-Object System.Drawing.Size(770, 20)
+$lblWifi.Size     = New-Object System.Drawing.Size(($clientW - 154), 20)
 # Обе стороны: закреплённая только слева, подпись не сжималась при
 # сужении окна и наезжала на кнопку, закрывая её собой.
 $lblWifi.Anchor   = 'Top,Left,Right'
@@ -367,7 +385,7 @@ $form.Controls.Add($lblWifi)
 # здесь оно написано прямо слева от кнопки — поэтому и надпись короткая,
 # что именно включается, сказано в подписи и в подсказке.
 $btnWhitelist = New-Object System.Windows.Forms.Button
-$btnWhitelist.Location = New-Object System.Drawing.Point(794, 29)
+$btnWhitelist.Location = New-Object System.Drawing.Point(($clientW - 130), 29)
 $btnWhitelist.Size     = New-Object System.Drawing.Size(120, 26)
 $btnWhitelist.Anchor   = 'Top,Right'
 $form.Controls.Add($btnWhitelist)
@@ -376,15 +394,15 @@ $tips = New-Object System.Windows.Forms.ToolTip
 
 $lblHint = New-Object System.Windows.Forms.Label
 $lblHint.Location = New-Object System.Drawing.Point(14, 58)
-$lblHint.Size     = New-Object System.Drawing.Size(900, 40)
+$lblHint.Size     = New-Object System.Drawing.Size(($clientW - 24), 40)
 $lblHint.Anchor   = 'Top,Left,Right'
 $lblHint.Text     = ('Отметьте, кого заблокировать и кого держать в белом списке Wi-Fi, затем нажмите «Применить».' + [Environment]::NewLine +
                      'Имя можно исправить прямо в таблице.')
 $form.Controls.Add($lblHint)
 
 $grid = New-Object System.Windows.Forms.DataGridView
-$grid.Location = New-Object System.Drawing.Point(14, 102)
-$grid.Size     = New-Object System.Drawing.Size(900, 397)
+$grid.Location = New-Object System.Drawing.Point(14, $gridTop)
+$grid.Size     = New-Object System.Drawing.Size(($clientW - 24), $gridHeight)
 $grid.Anchor   = 'Top,Left,Right,Bottom'
 $grid.AllowUserToAddRows          = $false
 $grid.AllowUserToDeleteRows       = $false
@@ -457,8 +475,8 @@ $gridMenu.Add_Opening({
 })
 
 $lblLegend = New-Object System.Windows.Forms.Label
-$lblLegend.Location  = New-Object System.Drawing.Point(14, 505)
-$lblLegend.Size      = New-Object System.Drawing.Size(900, 60)
+$lblLegend.Location  = New-Object System.Drawing.Point(14, $rowLegend)
+$lblLegend.Size      = New-Object System.Drawing.Size(($clientW - 24), 60)
 $lblLegend.Anchor    = 'Bottom,Left,Right'
 $lblLegend.ForeColor = [System.Drawing.Color]::Gray
 $lblLegend.Text      = ('Красным — случайные адреса: устройство может сменить такой адрес, и правило перестанет действовать.' + [Environment]::NewLine +
@@ -472,29 +490,29 @@ $form.Controls.Add($lblLegend)
 # кнопки. Высоты хватает на две строки, поэтому длинный текст переносится,
 # а не обрезается.
 $lblTime = New-Object System.Windows.Forms.Label
-$lblTime.Location  = New-Object System.Drawing.Point(14, 571)
-$lblTime.Size      = New-Object System.Drawing.Size(430, 40)
+$lblTime.Location  = New-Object System.Drawing.Point(14, $rowTime)
+$lblTime.Size      = New-Object System.Drawing.Size([Math]::Min(430, $clientW - 330), 40)
 $lblTime.Anchor    = 'Bottom,Left'
 $lblTime.ForeColor = [System.Drawing.Color]::Gray
 $form.Controls.Add($lblTime)
 
 $btnRefresh = New-Object System.Windows.Forms.Button
 $btnRefresh.Text     = 'Обновить'
-$btnRefresh.Location = New-Object System.Drawing.Point(624, 575)
+$btnRefresh.Location = New-Object System.Drawing.Point(($clientW - 300), $rowButtons)
 $btnRefresh.Size     = New-Object System.Drawing.Size(90, 28)
 $btnRefresh.Anchor   = 'Bottom,Right'
 $form.Controls.Add($btnRefresh)
 
 $btnApply = New-Object System.Windows.Forms.Button
 $btnApply.Text     = 'Применить'
-$btnApply.Location = New-Object System.Drawing.Point(720, 575)
+$btnApply.Location = New-Object System.Drawing.Point(($clientW - 204), $rowButtons)
 $btnApply.Size     = New-Object System.Drawing.Size(100, 28)
 $btnApply.Anchor   = 'Bottom,Right'
 $form.Controls.Add($btnApply)
 
 $btnClose = New-Object System.Windows.Forms.Button
 $btnClose.Text     = 'Закрыть'
-$btnClose.Location = New-Object System.Drawing.Point(826, 575)
+$btnClose.Location = New-Object System.Drawing.Point(($clientW - 98), $rowButtons)
 $btnClose.Size     = New-Object System.Drawing.Size(88, 28)
 $btnClose.Anchor   = 'Bottom,Right'
 $btnClose.Add_Click({ $form.Close() })
