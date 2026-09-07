@@ -195,11 +195,20 @@ function Show-Status {
     }
     Write-Host 'Rules          :'
     foreach ($r in $rules) {
-        $active = 'off'
-        if ($r.state) { $active = 'ON ' }
-        $verb = 'allow'
-        if ($r.enable -eq 'DROP') { $verb = 'BLOCK' }
-        Write-Host ("  [{0}] {1,-18} {2}" -f $active, $r.mac, $verb)
+        # State of the device, not of the rule. The old "[off] MAC BLOCK"
+        # was read as "blocked", while a switched-off rule blocks nothing:
+        # unblock keeps the entry so that blocking again costs one request.
+        if (-not $r.state) {
+            $verdict = 'allowed  (rule kept, switched off)'
+            $colour  = 'Gray'
+        } elseif ($r.enable -eq 'DROP') {
+            $verdict = 'BLOCKED'
+            $colour  = 'Red'
+        } else {
+            $verdict = 'allowed  (rule on)'
+            $colour  = 'Green'
+        }
+        Write-Host ("  {0,-18} {1}" -f $r.mac, $verdict) -ForegroundColor $colour
     }
 }
 
