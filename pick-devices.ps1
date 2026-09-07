@@ -101,6 +101,9 @@ function Get-Slot($Map, [string]$Mac) {
 # дополнительного чтения конфигурации 42.
 $script:Summary = $null
 
+# Конфигурация 42 целиком: нужна ниже, если whitelist.json ещё не создан.
+$script:WifiConfig = $null
+
 function Set-StateSummary($Firewall) {
     # Политика межсетевого экрана — нулевой элемент списка, у него нет
     # адреса. Он же решает, чёрный это список или белый.
@@ -116,7 +119,11 @@ function Set-StateSummary($Firewall) {
     # Белые списки Wi-Fi. Курсор выбора сети при чтении не нужен: ответ
     # одинаков с ним и без него, а лишняя запись изнашивала бы флеш-память
     # и оставляла бы на роутере флаг «конфигурация изменена».
-    $wifi    = Read-RouterConfig -Id $CFG_WIFI
+    $wifi = Read-RouterConfig -Id $CFG_WIFI
+    # Пригодится при сборке списка устройств: второй раз ту же конфигурацию
+    # читать незачем, это лишний круг к роутеру ради тех же данных.
+    $script:WifiConfig = $wifi
+
     $onBands = @()
     $listed  = 0
     foreach ($b in @(@{ P = ''; T = '2,4 ГГц' }, @{ P = '5G_'; T = '5 ГГц' })) {
@@ -211,7 +218,9 @@ function Get-DeviceInventory {
         }
     }
 
-    # Белый список.
+    # Белый список. Обычно источник истины — файл: по нему sync приводит
+    # список на роутере в соответствие, удаляя всё, чего в файле нет.
+    $script:WhitelistFromRouter = 0
     if (Test-Path $WhitelistFile) {
         $wl = Get-Content $WhitelistFile -Raw -Encoding UTF8 | ConvertFrom-Json
         foreach ($e in @($wl)) {
@@ -220,6 +229,30 @@ function Get-DeviceInventory {
             $r.InWhitelist = $true
             if ($e.band) { $r.WlBand = [string]$e.band }
             if (-not $r.Alias -and $e.name) { $r.Alias = [string]$e.name }
+        }
+    }
+    else {
+        # Файла нет — на новом компьютере это обычное дело: он не приезжает
+        # ни из репозитория, ни из первичной настройки. Считать список
+        # пустым нельзя: тогда первое же «Применить» вызвало бы sync, и
+        # список на роутере схлопнулся бы до отмеченного здесь, то есть
+        # до пустого. Поэтому, пока файла нет, отметки берём с роутера.
+        foreach ($b in @(@{ P = ''; Key = '2.4' }, @{ P = '5G_'; Key = '5' })) {
+            $lst = $script:WifiConfig."$($b.P)MacFilterList"
+            if (-not $lst) { continue }
+            foreach ($p in $lst.PSObject.Properties) {
+                if ($p.Name -eq 'max_instance' -or -not $p.Value.mac) { continue }
+                $r = Get-Slot $map $p.Value.mac
+                if ($r.InWhitelist) {
+                    # Один и тот же адрес в обоих списках — это и есть both.
+                    if ($r.WlBand -ne $b.Key) { $r.WlBand = 'both' }
+                } else {
+                    $r.WlBand      = $b.Key
+                    $r.InWhitelist = $true
+                    $script:WhitelistFromRouter++
+                }
+                if (-not $r.Alias -and $p.Value.hostname) { $r.Alias = [string]$p.Value.hostname }
+            }
         }
     }
 
@@ -293,6 +326,9 @@ if ($Text) {
         Write-Host $script:Summary.WifiText -ForegroundColor Red
     } else {
         Write-Host $script:Summary.WifiText -ForegroundColor Green
+    }
+    if ($script:WhitelistFromRouter -gt 0) {
+        Write-Host '                    отметки списка прочитаны с роутера: whitelist.json ещё нет'
     }
     Write-Host ''
     Write-Host ('{0,-20} {1,-19} {2,-14} {3,-11} {4,-16} {5}' -f `
@@ -623,6 +659,9 @@ function Update-View {
             if (-not $r.Online) { $row.Cells[$COL_STATE].Style.ForeColor = [System.Drawing.Color]::Gray }
         }
         $script:LastRefreshText = "Обновлено: $(Get-Date -Format 'HH:mm:ss') · устройств: $($inventory.Count)"
+        if ($script:WhitelistFromRouter -gt 0) {
+            $script:LastRefreshText += " · белый список прочитан с роутера, whitelist.json ещё нет"
+        }
     }
     catch {
         $lblFirewall.Text = 'Межсетевой экран: неизвестно'
@@ -848,6 +887,18 @@ function Invoke-WhitelistToggle {
 
     $action = 'on'
     if ($script:Summary.WifiOn) { $action = 'off' }
+
+    # Без файла wifi-whitelist.ps1 включать список откажется, а отметки в
+    # таблице сейчас взяты с роутера. Сохраняем то, что видно: это ровно
+    # то, что на роутере и есть, — правки заблокированы проверкой выше.
+    if ($action -eq 'on' -and -not (Test-Path $WhitelistFile)) {
+        $seed = @()
+        foreach ($e in (Get-GridState)) {
+            if (-not $e.White) { continue }
+            $seed += [pscustomobject]@{ Alias = $e.Alias; Mac = $e.Row.Mac; Band = $e.Row.WlBand }
+        }
+        Save-Whitelist $seed
+    }
 
     $form.Cursor          = 'WaitCursor'
     $btnWhitelist.Enabled = $false
