@@ -4,6 +4,10 @@ Block and unblock devices on a **D-Link DIR-825ACG1** home router from PowerShel
 
 The scripts talk to the undocumented JSON-RPC API of the "anweb" firmware. Two MAC filters are involved: the firewall one leaves a device connected but cuts its internet, on Wi-Fi and cable alike; the Wi-Fi one decides who may associate with the access point at all.
 
+![The device window](docs/window.png)
+
+*The main window: every device the router sees, two checkbox columns and the state of both filters. The devices shown are made up; the interface is in Russian.*
+
 > **This page describes release v1.0.0.** It is rewritten per release, not per commit, so between releases it lags behind the Russian documentation on purpose.
 
 ## Language
