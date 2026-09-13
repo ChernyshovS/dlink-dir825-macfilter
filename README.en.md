@@ -8,7 +8,7 @@ The scripts talk to the undocumented JSON-RPC API of the "anweb" firmware. Two M
 
 *The main window: every device the router sees, two checkbox columns and the state of both filters. The devices shown are made up; the interface is in Russian.*
 
-> **This page describes release v1.0.0.** It is rewritten per release, not per commit, so between releases it lags behind the Russian documentation on purpose.
+> **This page describes release v1.0.1.** It is rewritten per release, not per commit, so between releases it lags behind the Russian documentation on purpose.
 
 ## Language
 
