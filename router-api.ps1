@@ -1,4 +1,4 @@
-<#
+﻿<#
     Shared low-level access to the router's HTTP API.
 
     Dot-source it, call Initialize-RouterApi once, then use the wrappers:
@@ -75,6 +75,12 @@ function New-RouterHttpClient {
     $handler.CookieContainer   = New-Object System.Net.CookieContainer
     $handler.UseCookies        = $true
     $handler.AllowAutoRedirect = $false
+    # The router always sits on the local network, so no proxy can help us
+    # reach it. By default the handler takes the system proxy, and a machine
+    # with one configured -- a work laptop, say -- sends the request there
+    # instead, where it dies as a bare "an error occurred while sending the
+    # request". Seen in the wild, cost an evening to find.
+    $handler.UseProxy          = $false
     $client = New-Object System.Net.Http.HttpClient($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(20)
     return $client
@@ -185,6 +191,37 @@ function Invoke-RouterHttp {
                 return $text
             }
             $lastResponse = $r2
+        }
+        catch {
+            # A transport failure arrives wrapped several layers deep, and
+            # what the user gets to read is "an exception calling GetResult
+            # with 0 arguments: an error occurred while sending the request"
+            # -- true, and of no use to anyone. Say what happened and name
+            # the address that was tried. Messages are in Russian: this is
+            # the one error an ordinary user meets, and the windows that
+            # show it are Russian too.
+            $chain = @()
+            $ex    = $_.Exception
+            while ($ex) { $chain += $ex; $ex = $ex.InnerException }
+
+            $timedOut  = @($chain | Where-Object { $_ -is [System.Threading.Tasks.TaskCanceledException] }).Count -gt 0
+            $transport = @($chain | Where-Object {
+                $_ -is [System.Net.Http.HttpRequestException] -or
+                $_ -is [System.Net.Sockets.SocketException]   -or
+                $_ -is [System.Net.WebException]
+            }).Count -gt 0
+
+            if ($timedOut) {
+                throw ("Роутер по адресу $($script:RA_Router) не ответил вовремя. " +
+                       "Обычно это значит, что по этому адресу его нет: проверьте, к той ли сети " +
+                       "подключён компьютер. Другой адрес задаётся ключом -Router.")
+            }
+            if ($transport) {
+                throw ("Не удалось связаться с роутером по адресу $($script:RA_Router). " +
+                       "Проверьте, что компьютер подключён к его сети и что адрес верен — " +
+                       "другой задаётся ключом -Router.")
+            }
+            throw
         }
         finally { $client.Dispose() }
 
