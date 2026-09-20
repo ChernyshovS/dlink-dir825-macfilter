@@ -318,32 +318,48 @@ function Save-Whitelist($Entries) {
 # ------------------------------------------------------------- вывод в текст ---
 
 if ($Text) {
-    $inv = Get-DeviceInventory
-    Write-Host ''
-    Write-Host "Межсетевой экран:   $($script:Summary.Firewall)"
-    Write-Host 'Белый список Wi-Fi: ' -NoNewline
-    if ($script:Summary.WifiOn) {
-        Write-Host $script:Summary.WifiText -ForegroundColor Red
-    } else {
-        Write-Host $script:Summary.WifiText -ForegroundColor Green
-    }
-    if ($script:WhitelistFromRouter -gt 0) {
-        Write-Host '                    отметки списка прочитаны с роутера: whitelist.json ещё нет'
-    }
-    Write-Host ''
-    Write-Host ('{0,-20} {1,-19} {2,-14} {3,-11} {4,-16} {5}' -f `
-                'Имя', 'MAC-адрес', 'Подключение', 'Состояние', 'IP-адрес', 'Списки')
-    Write-Host ('-' * 105)
-    foreach ($r in $inv) {
-        $marks = @()
-        if ($r.Blocked)     { $marks += 'блок' }
-        if ($r.InWhitelist) { $marks += 'белый' }
-        if ($r.Random)      { $marks += 'случайный адрес' }
+    try {
+        $inv = Get-DeviceInventory
+        Write-Host ''
+        Write-Host "Межсетевой экран:   $($script:Summary.Firewall)"
+        Write-Host 'Белый список Wi-Fi: ' -NoNewline
+        if ($script:Summary.WifiOn) {
+            Write-Host $script:Summary.WifiText -ForegroundColor Red
+        } else {
+            Write-Host $script:Summary.WifiText -ForegroundColor Green
+        }
+        if ($script:WhitelistFromRouter -gt 0) {
+            Write-Host '                    отметки списка прочитаны с роутера: whitelist.json ещё нет'
+        }
+        Write-Host ''
         Write-Host ('{0,-20} {1,-19} {2,-14} {3,-11} {4,-16} {5}' -f `
-                    $r.Alias, $r.Mac, (Get-LinkText $r), (Get-StateText $r), $r.Ip, ($marks -join ', '))
+                    'Имя', 'MAC-адрес', 'Подключение', 'Состояние', 'IP-адрес', 'Списки')
+        Write-Host ('-' * 105)
+        foreach ($r in $inv) {
+            $marks = @()
+            if ($r.Blocked)     { $marks += 'блок' }
+            if ($r.InWhitelist) { $marks += 'белый' }
+            if ($r.Random)      { $marks += 'случайный адрес' }
+            Write-Host ('{0,-20} {1,-19} {2,-14} {3,-11} {4,-16} {5}' -f `
+                        $r.Alias, $r.Mac, (Get-LinkText $r), (Get-StateText $r), $r.Ip, ($marks -join ', '))
+        }
+        Write-Host ''
+        Write-Host "Всего устройств: $($inv.Count)"
     }
-    Write-Host ''
-    Write-Host "Всего устройств: $($inv.Count)"
+    catch {
+        # То же, что и в командной строке: человеку нужен текст сообщения,
+        # а не дамп на пол-экрана. Оконный режим сюда не заходит, там
+        # ошибки ловятся в обработчиках и показываются в окне.
+        Write-Host ''
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        $file = $_.InvocationInfo.ScriptName
+        if ($file) {
+            Write-Host ('{0}:{1}' -f (Split-Path -Leaf $file), $_.InvocationInfo.ScriptLineNumber) `
+                       -ForegroundColor DarkGray
+        }
+        Write-Host ''
+        exit 1
+    }
     return
 }
 

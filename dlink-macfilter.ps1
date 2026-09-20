@@ -50,6 +50,29 @@ $DevFile   = Join-Path $StateDir 'devices.json'
 . (Join-Path $PSScriptRoot 'router-api.ps1')
 Initialize-RouterApi -Router $Router -User $User -CredFile $CredFile
 
+trap {
+    # Окно зовёт этот скрипт оператором & в своём же процессе и ждёт
+    # исключение: по нему оно показывает ошибку в окне. Поэтому берём
+    # ошибку на себя только тогда, когда скрипт запущен сам по себе.
+    # Иначе она ушла бы в невидимую консоль, а окно решило бы, что всё
+    # получилось. При вызове через & здесь Internal — проверено.
+    if ($MyInvocation.CommandOrigin -ne 'Runspace') { break }
+
+    # А запущенный сам по себе скрипт без этого печатает дамп PowerShell:
+    # текст сообщения разрывается служебными строками и потом повторяется
+    # целиком в поле FullyQualifiedErrorId. Оставляем сам текст и одну
+    # строку о том, где всё встало — без неё отлаживать было бы хуже.
+    Write-Host ''
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    $file = $_.InvocationInfo.ScriptName
+    if ($file) {
+        Write-Host ('{0}:{1}' -f (Split-Path -Leaf $file), $_.InvocationInfo.ScriptLineNumber) `
+                   -ForegroundColor DarkGray
+    }
+    Write-Host ''
+    exit 1
+}
+
 # ---------------------------------------------------------------- helpers ---
 
 function Get-StoredCredential {
