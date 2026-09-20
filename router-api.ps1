@@ -89,7 +89,7 @@ function New-RouterHttpClient {
 function Get-RouterChallenge($Response) {
     $hdr = $null
     if (-not $Response.Headers.TryGetValues('Anweb-Authenticate', [ref]$hdr)) {
-        throw 'Router did not return an Anweb-Authenticate challenge.'
+        throw (Get-ForeignRouterMessage 'пароль он просит по-другому')
     }
     return @($hdr)[0]
 }
@@ -232,13 +232,58 @@ function Invoke-RouterHttp {
     throw 'Router refused the request after two authentication attempts.'
 }
 
+function Get-ForeignRouterMessage([string]$What) {
+    <#  Один текст на все случаи, когда по адресу роутера отвечает не он.
+        Это сообщение читает обычный человек, поэтому оно по-русски и
+        говорит, что делать, а не что сломалось внутри. #>
+    return ("По адресу $($script:RA_Router) отвечает не тот роутер: $What. " +
+            "Утилита работает только с D-Link DIR-825ACG1 (прошивка anweb). " +
+            "Проверьте, к той ли сети подключён компьютер; другой адрес " +
+            "задаётся ключом -Router.")
+}
+
+function Get-RouterTextSample([string]$Text) {
+    <# Начало ответа одной строкой, чтобы сообщение не разрослось. #>
+    $s = ($Text -replace '\s+', ' ').Trim()
+    if ($s.Length -gt 40) { $s = $s.Substring(0, 40) + '…' }
+    return "«$s»"
+}
+
+function ConvertFrom-RouterJson([string]$Text) {
+    <#  Разбор ответа роутера, но сначала — взгляд на то, чем этот ответ
+        вообще является. По адресу 192.168.0.1 в чужой сети обычно живёт
+        чужой роутер, и отвечает он своей страницей входа. Без проверки
+        пользователь получал от .NET «Недопустимый примитив JSON: .», где
+        пустое место перед точкой и было всем диагнозом: ответ начался с
+        "<", и разбор встал на первом же символе. #>
+    if (-not $Text -or -not $Text.Trim()) {
+        throw (Get-ForeignRouterMessage 'ответ пустой')
+    }
+
+    $head = $Text.TrimStart()
+    if (-not ($head.StartsWith('{') -or $head.StartsWith('['))) {
+        if ($head.StartsWith('<')) {
+            throw (Get-ForeignRouterMessage 'вместо данных пришла веб-страница')
+        }
+        throw (Get-ForeignRouterMessage "вместо данных пришло $(Get-RouterTextSample $head)")
+    }
+
+    try { return ($Text | ConvertFrom-Json -ErrorAction Stop) }
+    catch {
+        # Ответ начинался как JSON, а целиком не разобрался: это уже не чужое
+        # устройство, а испорченные данные. О них и говорим, отдельно.
+        throw ("Роутер по адресу $($script:RA_Router) ответил данными, которые " +
+               "не удалось разобрать. Начало ответа: $(Get-RouterTextSample $head)")
+    }
+}
+
 function Invoke-RouterRpc {
     param([Parameter(Mandatory = $true)][hashtable]$Payload)
 
     $body = $Payload | ConvertTo-Json -Depth 25 -Compress
     $url  = "http://$($script:RA_Router)$($script:RA_Endpoint)"
     $text = Invoke-RouterHttp -Method 'POST' -Path $script:RA_Endpoint -Url $url -Body $body
-    return ($text | ConvertFrom-Json)
+    return (ConvertFrom-RouterJson $text)
 }
 
 function Get-RouterDevInfo {
@@ -258,7 +303,7 @@ function Get-RouterDevInfo {
     $path = $script:RA_DevInfo
     $url  = "http://$($script:RA_Router)$path" + '?area=' + ($Area -join '|') + '&need_auth=1'
     $text = Invoke-RouterHttp -Method 'GET' -Path $path -Url $url
-    return ($text | ConvertFrom-Json).result
+    return (ConvertFrom-RouterJson $text).result
 }
 
 # ------------------------------------------------------------ config calls ---
