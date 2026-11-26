@@ -5,16 +5,14 @@
 .DESCRIPTION
     Управляет MAC-фильтром беспроводных сетей роутера D-Link DIR-825ACG1.
     В режиме «включено» к Wi-Fi могут подключиться только устройства из
-    whitelist.json, остальные не проходят авторизацию на точке доступа.
+    сохранённого на роутере списка. sync добавляет записи из whitelist.json после подтверждения.
 
     Проводные подключения этот фильтр НЕ затрагивает — устройства на LAN-портах
     продолжают работать. Ими управляет отдельный скрипт dlink-macfilter.ps1.
 
     Фильтр живёт в отдельной конфигурации, поэтому имена сетей, пароли и
-    каналы не изменяются никогда. Из настроек Wi-Fi читаются ровно два числа
-    на диапазон: включено ли радио и сколько в диапазоне сетей. Выключенный
-    диапазон пропускается, а при нескольких сетях снова ставится курсор
-    выбора сети — без него операция ушла бы не в ту сеть молча.
+    каналы здесь не меняются. Состояние выключенных диапазонов пропускается.
+    При нескольких сетях в диапазоне изменяйте фильтр через веб-интерфейс роутера.
 
 .EXAMPLE
     .\wifi-whitelist.ps1 status
@@ -26,8 +24,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status', 'on', 'off', 'sync')]
+    [ValidateSet('status', 'on', 'off', 'sync', 'patch')]
     [string]$Action = 'status',
+
+    [object[]]$Changes,
 
     # Работать в консоли, без диалоговых окон.
     [switch]$Text,
@@ -50,7 +50,6 @@ $CredFile      = Join-Path $PSScriptRoot 'cred.xml'
 $WhitelistFile = Join-Path $PSScriptRoot 'whitelist.json'
 
 $CFG_FILTER = 42   # политика доступа и списки MAC-адресов
-$CFG_CURSOR = 39   # выбор сети внутри диапазона; нужен только при нескольких сетях
 $CFG_WIFI   = 35   # настройки Wi-Fi; отсюда берём только состав сетей
 
 # Диапазоны: префикс полей в конфигурации -> человеческое имя и ключ в whitelist.json
@@ -70,7 +69,6 @@ Initialize-RouterApi -Router $Router -User $User -CredFile $CredFile
 # Устройство сети: включён ли диапазон и сколько в нём сетей. Читается один
 # раз за запуск — на этом держатся два решения ниже.
 $script:Topology     = $null
-$script:CursorWritten = $false
 
 function Get-WifiTopology {
     <#  Из настроек Wi-Fi берём ровно два числа на диапазон и ничего больше:
@@ -82,7 +80,7 @@ function Get-WifiTopology {
     $t = @{}
     foreach ($b in $Bands) {
         $t[$b.Key] = [pscustomobject]@{
-            Enabled  = [bool]$d."$($b.Prefix)Radio"
+            Enabled  = [string]$d."$($b.Prefix)Radio" -in @("True", "1")
             Networks = [int]$d."$($b.Prefix)mbssidNum"
         }
     }
@@ -94,20 +92,6 @@ function Get-EnabledBands {
     <# Диапазоны, в которые вообще имеет смысл писать. #>
     $t = Get-WifiTopology
     return @($Bands | Where-Object { $t[$_.Key].Enabled })
-}
-
-function Set-BandCursorIfNeeded([string]$Prefix) {
-    <#  Курсор выбирает сеть внутри диапазона. Пока сеть одна, он всегда
-        указывает на неё, и его установка — лишний запрос, который вдобавок
-        помечает конфигурацию изменённой. Появится гостевая сеть — курсор
-        снова становится обязательным, иначе операция уйдёт не в ту сеть
-        молча. Значение 1 — основная сеть, гостевые идут следом. #>
-    $band = $Bands | Where-Object { $_.Prefix -eq $Prefix } | Select-Object -First 1
-    if (-not $band) { return }
-    if ((Get-WifiTopology)[$band.Key].Networks -le 1) { return }
-
-    Write-RouterConfig -Id $CFG_CURSOR -Data @{ "${Prefix}mbssidCur" = 1 } -Save $false | Out-Null
-    $script:CursorWritten = $true
 }
 
 function Get-SafeHostname([string]$Name) {
@@ -169,7 +153,6 @@ function Get-WhitelistDevices($ByBand) {
 }
 
 function Get-BandState([string]$Prefix) {
-    Set-BandCursorIfNeeded $Prefix
     $d = Read-RouterConfig -Id $CFG_FILTER
 
     $policy = [int]$d."${Prefix}AccessPolicy"
@@ -209,12 +192,9 @@ function Get-PolicyTitle([int]$Policy) {
 # флеш вместо одной. Обрыв на середине теперь оставляет изменения только
 # в оперативной конфигурации, и перезагрузка их отменит.
 #
-# Диапазон задаёт префикс имени поля, а не курсор — проверено на
-# устройстве. Курсор нужен только при нескольких сетях в диапазоне, этим
-# и занимается Set-BandCursorIfNeeded.
+# Диапазон задаётся префиксом поля для единственной сети в диапазоне.
 
 function Add-BandRule([string]$Prefix, [string]$Mac, [string]$Name) {
-    Set-BandCursorIfNeeded $Prefix
     $rule = @{ mac = $Mac; hostname = (Get-SafeHostname $Name); active = $true }
     Write-RouterConfig -Id $CFG_FILTER -Data @{ "${Prefix}MacFilterList" = $rule } -Pos -1 -Save $false | Out-Null
 }
@@ -222,12 +202,10 @@ function Add-BandRule([string]$Prefix, [string]$Mac, [string]$Name) {
 function Remove-BandRule([string]$Prefix, [int]$Pos, $Entry) {
     # Удаляем ту же запись, что и читали: контейнер тот же, что при записи,
     # позиция — номер записи в списке.
-    Set-BandCursorIfNeeded $Prefix
     Remove-RouterConfig -Id $CFG_FILTER -Data @{ "${Prefix}MacFilterList" = $Entry } -Pos $Pos -Save $false | Out-Null
 }
 
 function Set-BandPolicy([string]$Prefix, [int]$Policy) {
-    Set-BandCursorIfNeeded $Prefix
     Write-RouterConfig -Id $CFG_FILTER -Data @{ "${Prefix}AccessPolicy" = $Policy } -Save $false | Out-Null
 }
 
@@ -267,7 +245,8 @@ function Invoke-Status {
             continue
         }
         if ($topo[$b.Key].Networks -gt 1) {
-            Write-Host ("{0,-8} сетей в диапазоне: {1}; показана основная" -f $b.Title, $topo[$b.Key].Networks)
+            Write-Host ("{0,-8} несколько сетей — фильтр смотрите в веб-интерфейсе" -f $b.Title)
+            continue
         }
         $st = Get-BandState $b.Prefix
         Write-Host ("{0,-8} фильтр: {1}" -f $b.Title, (Get-PolicyTitle $st.Policy))
@@ -283,187 +262,166 @@ function Invoke-Status {
     }
 }
 
-function Invoke-Enable {
-    $wl = Get-Whitelist
-    $localMacs = Get-LocalMacAddresses
-
-    # Выключенный диапазон пропускаем целиком: писать в него правила
-    # бессмысленно, а пустой список для него — не повод отказываться.
-    $active = Get-EnabledBands
-    if ($active.Count -eq 0) {
-        throw 'Wi-Fi выключен в обоих диапазонах — включать белый список не для чего.'
+function Get-LiveRulesForChanges {
+    $active = @(Get-EnabledBands)
+    foreach ($band in $active) {
+        if ((Get-WifiTopology)[$band.Key].Networks -ne 1) {
+            throw 'Не удалось однозначно определить сеть. Измените белый список в веб-интерфейсе роутера.'
+        }
     }
+    $states = @{}
+    foreach ($band in $active) { $states[$band.Key] = Get-BandState $band.Prefix }
+    return $states
+}
 
-    # --- проверки до любой записи ---------------------------------------
-    foreach ($b in $active) {
-        if ($wl[$b.Key].Count -eq 0 -and -not $Force) {
-            throw ("Для диапазона $($b.Title) белый список пуст. Включение отрезало бы " +
-                   "от Wi-Fi все устройства в этом диапазоне. Дополните whitelist.json.")
+function Get-RuleState($Rules, [string]$Mac) {
+    $found = @($Rules | Where-Object { $_.Mac -eq $Mac })
+    if ($found.Count -gt 1) { throw "Для $Mac найдено несколько правил. Проверьте их в настройках роутера." }
+    if ($found.Count -eq 0) { return 'none' }
+    if ($found[0].Active) { return 'active' }
+    return 'inactive'
+}
+
+function Invoke-ApplyWifiChanges($Edits, $States) {
+    if (@($Edits).Count -eq 0) { return }
+    $local = @(Get-LocalMacAddresses)
+    $checked = @()
+    $seen = @{}
+    foreach ($edit in $Edits) {
+        $band = $Bands | Where-Object { $_.Key -eq $edit.band } | Select-Object -First 1
+        $mac = ConvertTo-RouterMac $edit.mac
+        if (-not $band -or -not $States.ContainsKey($band.Key) -or $mac -notmatch '^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$' -or
+            $edit.enabled -isnot [bool] -or $edit.expected -notin @('none','active','inactive')) {
+            throw 'Некорректное изменение белого списка.'
+        }
+        $key = "$($band.Key):$mac"
+        if ($seen.ContainsKey($key)) { throw 'Одно правило указано дважды.' }
+        $seen[$key] = $true
+        $state = $States[$band.Key]
+        if ($state.Policy -eq $POLICY_DENY) { throw "В диапазоне $($band.Title) действует чёрный список." }
+        if ($null -ne $edit.policy -and [int]$edit.policy -ne $state.Policy) {
+            throw 'Политика Wi-Fi изменилась с момента открытия списка. Обновите окно.'
+        }
+        $actual = Get-RuleState $state.Rules $mac
+        if ($actual -ne $edit.expected) { throw "Правило $mac изменилось с момента открытия списка. Обновите окно." }
+        if (-not $Force -and -not $edit.enabled -and $state.Policy -eq $POLICY_ALLOW -and
+            ($local.Count -eq 0 -or $local -contains $mac)) {
+            throw 'Удаление может лишить этот компьютер доступа к роутеру.'
+        }
+        $want = if ($edit.enabled) { 'active' } else { 'none' }
+        if ($want -ne $actual) {
+            $checked += [pscustomobject]@{ Band=$band; Mac=$mac; Name=[string]$edit.name; Enabled=$edit.enabled;
+                Expected=$actual; Wanted=$want }
+        }
+    }
+    if ($checked.Count -eq 0) { return }
+
+    foreach ($band in $Bands) {
+        if (-not $States.ContainsKey($band.Key)) { continue }
+        $bandEdits = @($checked | Where-Object { $_.Band.Key -eq $band.Key })
+        if ($bandEdits.Count -eq 0) { continue }
+        $state = $States[$band.Key]
+        $activeMacs = @($state.Rules | Where-Object Active | ForEach-Object Mac)
+        foreach ($edit in $bandEdits) {
+            $activeMacs = @($activeMacs | Where-Object { $_ -ne $edit.Mac })
+            if ($edit.Enabled) { $activeMacs += $edit.Mac }
+        }
+        if ($state.Policy -eq $POLICY_ALLOW -and $activeMacs.Count -eq 0 -and -not $Force) {
+            throw "В действующем белом списке $($band.Title) должно остаться хотя бы одно устройство."
         }
     }
 
-    $allMacs = @()
-    foreach ($b in $active) { $allMacs += $wl[$b.Key].Mac }
-    $selfPresent = @($allMacs | Where-Object { $localMacs -contains $_ }).Count -gt 0
-
-    if (-not $selfPresent -and -not $Force) {
-        throw ("В белом списке нет ни одного сетевого адаптера этого компьютера. " +
-               "После включения вы потеряете и Wi-Fi, и доступ к роутеру. " +
-               "Добавьте свой адрес в whitelist.json или запустите с ключом -Force.")
-    }
-
-    $warnings = @()
-    foreach ($b in $active) {
-        $hasSelf = @($wl[$b.Key].Mac | Where-Object { $localMacs -contains $_ }).Count -gt 0
-        if (-not $hasSelf) {
-            $warnings += "В диапазоне $($b.Title) нет адреса этого компьютера — подключившись к нему, вы потеряете управление."
+    foreach ($edit in ($checked | Sort-Object Enabled -Descending)) {
+        $state = Get-BandState $edit.Band.Prefix
+        if ($state.Policy -ne $States[$edit.Band.Key].Policy -or (Get-RuleState $state.Rules $edit.Mac) -ne $edit.Expected) {
+            throw "Правило $($edit.Mac) изменилось. Обновите окно и проверьте результат."
         }
-    }
-    foreach ($b in $Bands) {
-        if ($active -notcontains $b) { $warnings += "Диапазон $($b.Title) выключен на роутере — он пропущен." }
-    }
-
-    # --- подтверждение ---------------------------------------------------
-    $lines = @('После включения доступ к Wi-Fi сохранят только эти устройства:', '')
-    foreach ($d in (Get-WhitelistDevices $wl)) {
-        $lines += ('  {0,-18} {1}   {2} ГГц' -f $d.Name, $d.Mac, ($d.Bands -join ' и '))
-    }
-    $lines += ''
-    $lines += 'Все остальные устройства не смогут подключиться к Wi-Fi.'
-    $lines += 'Проводные подключения не затрагиваются.'
-    if ($warnings.Count -gt 0) { $lines += ''; $lines += $warnings }
-    $lines += ''
-    $lines += 'Включить белый список?'
-
-    if (-not (Confirm-Action ($lines -join [Environment]::NewLine) 'Белый список Wi-Fi')) {
-        Show-Message 'Отменено, ничего не изменено.' 'Белый список Wi-Fi' 'info'
-        return
-    }
-
-    # --- этап 1: наполняем списки (политика ещё выключена) ---------------
-    $added = 0
-    foreach ($b in $active) {
-        $st = Get-BandState $b.Prefix
-        if ($st.MaxRules -gt 0 -and $wl[$b.Key].Count -gt $st.MaxRules) {
-            throw "В диапазоне $($b.Title) роутер принимает не более $($st.MaxRules) адресов, а в списке $($wl[$b.Key].Count)."
-        }
-        $existing = @($st.Rules.Mac)
-        foreach ($e in $wl[$b.Key]) {
-            if ($existing -notcontains $e.Mac) {
-                Add-BandRule $b.Prefix $e.Mac $e.Name
-                $added++
+        $existing = $state.Rules | Where-Object { $_.Mac -eq $edit.Mac } | Select-Object -First 1
+        if ($existing) {
+            if (-not $Force -and -not $edit.Enabled -and $existing.Active -and $state.Policy -eq $POLICY_ALLOW -and
+                @($state.Rules | Where-Object { $_.Active -and $_.Mac -ne $edit.Mac }).Count -eq 0) {
+                throw 'Последнее устройство действующего белого списка удалить нельзя.'
             }
+            Remove-BandRule $edit.Band.Prefix $existing.Pos $existing.Raw
+        }
+        if ($edit.Enabled) { Add-BandRule $edit.Band.Prefix $edit.Mac $edit.Name }
+    }
+
+    $verified = Get-LiveRulesForChanges
+    foreach ($edit in $checked) {
+        if (-not $verified.ContainsKey($edit.Band.Key) -or
+            (Get-RuleState $verified[$edit.Band.Key].Rules $edit.Mac) -ne $edit.Wanted) {
+            throw 'Роутер показал другой результат. Обновите окно перед повтором.'
         }
     }
+    Save-RouterConfig | Out-Null
+    Show-Message "Правила проверены и сохранены. Изменений: $($checked.Count)." 'Белый список Wi-Fi' 'info'
+}
 
-    # --- этап 2: включаем политику последней командой --------------------
-    foreach ($b in $active) { Set-BandPolicy $b.Prefix $POLICY_ALLOW }
-
-    # --- проверка результата ---------------------------------------------
-    $report = @('Белый список включён.', '')
-    foreach ($b in $active) {
-        $st = Get-BandState $b.Prefix
-        $report += "$($b.Title): $(Get-PolicyTitle $st.Policy), адресов в списке: $($st.Rules.Count)"
+function Invoke-PolicyFromRouter([int]$Policy) {
+    $before = Get-LiveRulesForChanges
+    $targets = @($Bands | Where-Object { $before.ContainsKey($_.Key) -and $before[$_.Key].Policy -ne $Policy })
+    if ($targets.Count -eq 0) { return }
+    $local = @(Get-LocalMacAddresses)
+    $lines = @()
+    foreach ($band in $targets) {
+        $state = $before[$band.Key]
+        if ($state.Policy -eq $POLICY_DENY) { throw "В диапазоне $($band.Title) действует чёрный список." }
+        $allow = @($state.Rules | Where-Object Active | ForEach-Object Mac)
+        if ($Policy -eq $POLICY_ALLOW -and -not $Force -and
+            ($allow.Count -eq 0 -or @($allow | Where-Object { $local -contains $_ }).Count -eq 0)) {
+            throw "Добавьте MAC этого компьютера в белый список $($band.Title)."
+        }
+        $lines += "$($band.Title): $(Get-PolicyTitle $Policy)"
+        if ($Policy -eq $POLICY_ALLOW) { $lines += @($allow | Sort-Object) }
     }
-    $report += ''
-    $report += "Добавлено новых записей: $added"
-    Show-Message ($report -join [Environment]::NewLine) 'Белый список Wi-Fi' 'info'
+    if (-not (Confirm-Action ($lines -join "`n") 'Изменить режим Wi-Fi?')) { return }
+    $fresh = Get-LiveRulesForChanges
+    foreach ($band in $targets) {
+        if (-not $fresh.ContainsKey($band.Key)) { throw 'Состав сетей изменился. Обновите окно.' }
+        $state = $fresh[$band.Key]
+        $expected = @($before[$band.Key].Rules | Where-Object Active | ForEach-Object Mac | Sort-Object) -join ' '
+        $actual = @($state.Rules | Where-Object Active | ForEach-Object Mac | Sort-Object) -join ' '
+        if ($state.Policy -ne $before[$band.Key].Policy -or $actual -ne $expected) { throw 'Правила Wi-Fi изменились. Обновите окно.' }
+    }
+    foreach ($band in $targets) {
+        Set-BandPolicy $band.Prefix $Policy
+        if ((Get-BandState $band.Prefix).Policy -ne $Policy) { throw "Роутер не подтвердил политику $($band.Title)." }
+    }
+    Save-RouterConfig | Out-Null
+    Show-Message 'Политика Wi-Fi проверена и сохранена.' 'Белый список Wi-Fi' 'info'
 }
 
 function Invoke-Sync {
-    <#  Приводит списки на роутере в соответствие с whitelist.json: лишние
-        адреса удаляет, недостающие добавляет. Политику доступа не трогает —
-        включение и выключение остаются отдельными действиями.
-
-        Нужно потому, что «включить» умеет только добавлять. Без удаления
-        вычеркнутое из файла устройство сохраняло бы доступ к Wi-Fi, и файл
-        перестал бы быть единственным источником правды. #>
-
-    $wl        = Get-Whitelist
-    $localMacs = Get-LocalMacAddresses
-    $active    = Get-EnabledBands
-
-    # --- проверка до любой записи ----------------------------------------
-    foreach ($b in $active) {
-        $st   = Get-BandState $b.Prefix
-        $want = @($wl[$b.Key].Mac)
-        if ($st.Policy -eq $POLICY_ALLOW -and -not $Force) {
-            $losing = @($st.Rules | Where-Object { $want -notcontains $_.Mac -and $localMacs -contains $_.Mac })
-            if ($losing.Count -gt 0) {
-                throw ("В диапазоне $($b.Title) синхронизация удалила бы адрес этого компьютера " +
-                       "($($losing[0].Mac)), а белый список сейчас включён — доступ к роутеру пропал бы " +
-                       "сразу. Верните адрес в whitelist.json или запустите с ключом -Force.")
+    $states = Get-LiveRulesForChanges
+    $file = Get-Whitelist
+    $edits = @()
+    foreach ($band in $Bands) {
+        if (-not $states.ContainsKey($band.Key)) { continue }
+        foreach ($entry in $file[$band.Key]) {
+            $before = Get-RuleState $states[$band.Key].Rules $entry.Mac
+            if ($before -ne 'active') {
+                $edits += [pscustomobject]@{ band=$band.Key; mac=$entry.Mac; name=$entry.Name; enabled=$true; expected=$before;
+                    policy=$states[$band.Key].Policy }
             }
         }
     }
-
-    # --- удаление лишних, затем добавление недостающих --------------------
-    $removed = 0
-    $added   = 0
-    foreach ($b in $active) {
-        $st   = Get-BandState $b.Prefix
-        $want = @($wl[$b.Key].Mac)
-
-        # Номера позиций устойчивы: удаление одной записи не сдвигает
-        # остальные, так что порядок не важен. С конца — просто на случай,
-        # если другая прошивка поведёт себя иначе.
-        $extra = @($st.Rules | Where-Object { $want -notcontains $_.Mac } | Sort-Object Pos -Descending)
-        foreach ($e in $extra) {
-            Remove-BandRule $b.Prefix $e.Pos $e.Raw
-            $removed++
-        }
-
-        $have = @((Get-BandState $b.Prefix).Rules.Mac)
-        foreach ($e in $wl[$b.Key]) {
-            if ($have -notcontains $e.Mac) {
-                Add-BandRule $b.Prefix $e.Mac $e.Name
-                $added++
-            }
-        }
-    }
-
-    # --- отчёт по тому, что реально лежит на роутере ----------------------
-    $report = @('Списки на роутере приведены в соответствие с whitelist.json.', '')
-    foreach ($b in $active) {
-        $st = Get-BandState $b.Prefix
-        $report += "$($b.Title): записей $($st.Rules.Count), фильтр — $(Get-PolicyTitle $st.Policy)"
-        foreach ($r in $st.Rules) { $report += "     $($r.Mac)   $($r.Host)" }
-        $report += ''
-    }
-    $report += "Удалено: $removed, добавлено: $added"
-    Show-Message ($report -join [Environment]::NewLine) 'Белый список Wi-Fi' 'info'
+    if ($edits.Count -eq 0) { return }
+    $lines = $edits | ForEach-Object { "Добавить $($_.mac) · $($_.band) ГГц" }
+    if (Confirm-Action ($lines -join "`n") 'Импорт из whitelist.json') { Invoke-ApplyWifiChanges $edits $states }
 }
 
-function Invoke-Disable {
-    $active = Get-EnabledBands
-    foreach ($b in $active) { Set-BandPolicy $b.Prefix $POLICY_OFF }
-
-    $report = @('Белый список выключен, Wi-Fi открыт для всех устройств.', '')
-    foreach ($b in $active) {
-        $st = Get-BandState $b.Prefix
-        $report += "$($b.Title): $(Get-PolicyTitle $st.Policy), записей сохранено: $($st.Rules.Count)"
-    }
-    $report += ''
-    $report += 'Список адресов сохранён — повторное включение будет быстрым.'
-    Show-Message ($report -join [Environment]::NewLine) 'Белый список Wi-Fi' 'info'
-}
 
 # ---------------------------------------------------------------------- запуск ---
 
 try {
     switch ($Action) {
         'status' { Invoke-Status }
-        'on'     { Invoke-Enable }
-        'off'    { Invoke-Disable }
+        'on'     { Invoke-PolicyFromRouter $POLICY_ALLOW }
+        'off'    { Invoke-PolicyFromRouter $POLICY_OFF }
         'sync'   { Invoke-Sync }
+        'patch'  { Invoke-ApplyWifiChanges $Changes (Get-LiveRulesForChanges) }
     }
-    # Единственная запись во флеш-память за всё действие: правила выше
-    # писались с save=false и до этой команды живут только в оперативной
-    # конфигурации, из-за чего роутер считает её изменённой. Просмотр
-    # состояния обычно не пишет ничего — кроме случая с несколькими сетями
-    # в диапазоне, когда приходится ставить курсор, а он тоже помечает
-    # конфигурацию изменённой.
-    if ($Action -ne 'status' -or $script:CursorWritten) { Save-RouterConfig | Out-Null }
 }
 catch {
     if ($Text -or $Action -eq 'status') { throw }

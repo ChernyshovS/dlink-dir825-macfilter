@@ -219,13 +219,11 @@ The safe order is the opposite: fill the lists on both bands first, switch the p
 
 ### The list file and the list on the router
 
-The whitelist lives in `whitelist.json`, and `sync` brings the router in line with it: it adds the missing addresses and removes the extra ones. The file is the source of truth — which holds exactly as long as the file exists.
+The Windows picker reads configuration 42, specifically `MacFilterList` and `5G_MacFilterList`. A checked box means the address has an active rule in at least one enabled band. Editing that box applies the change in both enabled bands. `sync` adds or activates entries from `whitelist.json` and keeps the other rules on the router.
 
-On a new computer it does not: it is not in the repository and the initial setup does not create it. Reading a missing file as an empty list means showing an empty table, and the first sync then wipes everything the router held. The failure is a quiet one: until the whitelist is switched on it breaks nothing, and it surfaces later, when the list goes on and half the devices cannot connect.
+Before writing, the script compares the policy and relevant rules with its snapshot. It rereads the edited rules and saves the configuration after verifying the result. The check and write are separate requests. If the connection drops, some changes may already be active before the save.
 
-So, finding no file, the device picker reads the marks straight from configuration 42: it walks `MacFilterList` and `5G_MacFilterList` and counts in how many lists an address appears. In both — `both`, in one — that band. The band is written into the file the very same way, so a list collected from the router matches a previously saved file — verified by comparing four entries covering all three combinations.
-
-It costs no extra request: configuration 42 has already been read for the status line. Reading creates no file — it appears on the first save, or when the list is switched on and `wifi-whitelist.ps1` demands it.
+The utility reads configuration 35 to count the networks in each enabled band. Use the router's web interface to edit the filter when a band has multiple networks.
 
 ---
 

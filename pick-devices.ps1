@@ -35,7 +35,6 @@ $MainScript      = Join-Path $PSScriptRoot 'dlink-macfilter.ps1'
 $WhitelistScript = Join-Path $PSScriptRoot 'wifi-whitelist.ps1'
 $CredFile        = Join-Path $PSScriptRoot 'cred.xml'
 $DevFile         = Join-Path $PSScriptRoot 'devices.json'
-$WhitelistFile   = Join-Path $PSScriptRoot 'whitelist.json'
 
 if (-not (Test-Path $MainScript)) { throw "Рядом со скриптом не найден dlink-macfilter.ps1 ($PSScriptRoot)." }
 
@@ -89,7 +88,7 @@ function Get-Slot($Map, [string]$Mac) {
             HasRule     = $false
             InDevices   = $false
             InWhitelist = $false
-            WlBand      = 'both'
+            WifiRules   = @{}
             Random      = (Test-RandomMac $key)
         }
     }
@@ -101,7 +100,7 @@ function Get-Slot($Map, [string]$Mac) {
 # дополнительного чтения конфигурации 42.
 $script:Summary = $null
 
-# Конфигурация 42 целиком: нужна ниже, если whitelist.json ещё не создан.
+# Снимок фильтра Wi-Fi используется для отметок и сравнения перед записью.
 $script:WifiConfig = $null
 
 function Set-StateSummary($Firewall) {
@@ -116,12 +115,16 @@ function Set-StateSummary($Firewall) {
         $fwText = 'разрешать всё — фильтр ещё не настроен'
     }
 
-    # Белые списки Wi-Fi. Курсор выбора сети при чтении не нужен: ответ
-    # одинаков с ним и без него, а лишняя запись изнашивала бы флеш-память
-    # и оставляла бы на роутере флаг «конфигурация изменена».
-    $wifi = Read-RouterConfig -Id $CFG_WIFI
-    # Пригодится при сборке списка устройств: второй раз ту же конфигурацию
-    # читать незачем, это лишний круг к роутеру ради тех же данных.
+    $topology = Read-RouterConfig -Id 35
+    $script:WifiBands = @('2.4'; '5') | Where-Object {
+        $prefix = if ($_ -eq '5') { '5G_' } else { '' }
+        [string]$topology."${prefix}Radio" -in @('True','1')
+    }
+    $ambiguous = @($script:WifiBands | Where-Object {
+        $prefix = if ($_ -eq '5') { '5G_' } else { '' }
+        [int]$topology."${prefix}mbssidNum" -ne 1
+    }).Count -gt 0
+    $wifi = if ($ambiguous) { $null } else { Read-RouterConfig -Id $CFG_WIFI }
     $script:WifiConfig = $wifi
 
     $onBands = @()
@@ -134,7 +137,9 @@ function Set-StateSummary($Firewall) {
         }
     }
 
-    if ($onBands.Count -gt 0) {
+    if ($ambiguous) {
+        $wlText = 'несколько сетей — настройте фильтр в веб-интерфейсе роутера'
+    } elseif ($onBands.Count -gt 0) {
         $wlText = "ВКЛЮЧЁН ($($onBands -join ' и ')) — к Wi-Fi пускает только отмеченных, записей $listed"
     } else {
         $wlText = 'выключен — Wi-Fi открыт для всех'
@@ -143,6 +148,7 @@ function Set-StateSummary($Firewall) {
     $script:Summary = [pscustomobject]@{
         Firewall = $fwText
         WifiOn   = ($onBands.Count -gt 0)
+        WifiEditable = (-not $ambiguous -and @($script:WifiBands).Count -gt 0)
         WifiText = $wlText
     }
 }
@@ -218,40 +224,17 @@ function Get-DeviceInventory {
         }
     }
 
-    # Белый список. Обычно источник истины — файл: по нему sync приводит
-    # список на роутере в соответствие, удаляя всё, чего в файле нет.
-    $script:WhitelistFromRouter = 0
-    if (Test-Path $WhitelistFile) {
-        $wl = Get-Content $WhitelistFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        foreach ($e in @($wl)) {
-            if (-not $e.mac) { continue }
-            $r = Get-Slot $map $e.mac
-            $r.InWhitelist = $true
-            if ($e.band) { $r.WlBand = [string]$e.band }
-            if (-not $r.Alias -and $e.name) { $r.Alias = [string]$e.name }
-        }
-    }
-    else {
-        # Файла нет — на новом компьютере это обычное дело: он не приезжает
-        # ни из репозитория, ни из первичной настройки. Считать список
-        # пустым нельзя: тогда первое же «Применить» вызвало бы sync, и
-        # список на роутере схлопнулся бы до отмеченного здесь, то есть
-        # до пустого. Поэтому, пока файла нет, отметки берём с роутера.
-        foreach ($b in @(@{ P = ''; Key = '2.4' }, @{ P = '5G_'; Key = '5' })) {
-            $lst = $script:WifiConfig."$($b.P)MacFilterList"
-            if (-not $lst) { continue }
-            foreach ($p in $lst.PSObject.Properties) {
-                if ($p.Name -eq 'max_instance' -or -not $p.Value.mac) { continue }
-                $r = Get-Slot $map $p.Value.mac
-                if ($r.InWhitelist) {
-                    # Один и тот же адрес в обоих списках — это и есть both.
-                    if ($r.WlBand -ne $b.Key) { $r.WlBand = 'both' }
-                } else {
-                    $r.WlBand      = $b.Key
-                    $r.InWhitelist = $true
-                    $script:WhitelistFromRouter++
-                }
-                if (-not $r.Alias -and $p.Value.hostname) { $r.Alias = [string]$p.Value.hostname }
+    if ($script:WifiConfig) {
+        foreach ($band in $script:WifiBands) {
+            $prefix = if ($band -eq '5') { '5G_' } else { '' }
+            $list = $script:WifiConfig."${prefix}MacFilterList"
+            if (-not $list) { continue }
+            foreach ($entry in $list.PSObject.Properties) {
+                if ($entry.Name -eq 'max_instance' -or -not $entry.Value.mac) { continue }
+                $r = Get-Slot $map $entry.Value.mac
+                $r.WifiRules[$band] = if ($entry.Value.active) { 'active' } else { 'inactive' }
+                if ($entry.Value.active) { $r.InWhitelist = $true }
+                if (-not $r.Alias -and $entry.Value.hostname) { $r.Alias = [string]$entry.Value.hostname }
             }
         }
     }
@@ -301,18 +284,38 @@ function Save-DeviceAliases($Entries) {
     ($obj | ConvertTo-Json) | Set-Content -Path $DevFile -Encoding UTF8
 }
 
-function Save-Whitelist($Entries) {
-    $list = @()
-    foreach ($e in $Entries) {
-        $list += [pscustomobject]@{ name = $e.Alias; mac = $e.Mac; band = $e.Band }
+function Get-WifiRowChanges($Row, [string]$Name, [bool]$Enabled) {
+    foreach ($band in $script:WifiBands) {
+        $before = if ($Row.WifiRules.ContainsKey($band)) { $Row.WifiRules[$band] } else { 'none' }
+        if (($Enabled -and $before -eq 'active') -or (-not $Enabled -and $before -eq 'none')) { continue }
+        $prefix = if ($band -eq '5') { '5G_' } else { '' }
+        [pscustomobject]@{ band=$band; name=$Name; mac=$Row.Mac; enabled=$Enabled; expected=$before;
+            policy=[int]$script:WifiConfig."${prefix}AccessPolicy" }
     }
-    if ($list.Count -eq 0) {
-        '[]' | Set-Content -Path $WhitelistFile -Encoding UTF8
-        return
+}
+
+function Assert-FirewallState($Rows) {
+    if (@($Rows).Count -eq 0) { return }
+    $filter = @( (Read-RouterConfig -Id 74).macfilter )
+    if ($filter.Count -gt 0 -and $filter[0] -and ($filter[0].mac -or $filter[0].state)) {
+        throw 'Политика межсетевого экрана изменилась или не поддерживается.'
     }
-    # -InputObject, а не конвейер: иначе список из одной записи превратится
-    # в объект вместо массива, и wifi-whitelist.ps1 его не прочитает.
-    (ConvertTo-Json -InputObject $list -Depth 5) | Set-Content -Path $WhitelistFile -Encoding UTF8
+    foreach ($row in $Rows) {
+        $rules = @($filter | Where-Object { $_.mac -and (ConvertTo-RouterMac $_.mac) -eq $row.Mac })
+        $blocked = $rules.Count -eq 1 -and [bool]$rules[0].state -and $rules[0].enable -eq 'DROP'
+        if ($rules.Count -gt 1 -or ($rules.Count -eq 1) -ne $row.HasRule -or $blocked -ne $row.Blocked) {
+            throw "Правило $($row.Mac) изменилось. Обновите окно перед применением."
+        }
+    }
+}
+
+function Confirm-FirewallChange([string]$Mac, [bool]$Blocked, [switch]$Removed) {
+    $filter = @((Read-RouterConfig -Id 74).macfilter)
+    $rules = @($filter | Where-Object { $_.mac -and (ConvertTo-RouterMac $_.mac) -eq $Mac })
+    $actual = $rules.Count -eq 1 -and [bool]$rules[0].state -and $rules[0].enable -eq 'DROP'
+    if ($rules.Count -gt 1 -or ($Removed -and $rules.Count -ne 0) -or $actual -ne $Blocked) {
+        throw "Роутер не подтвердил изменение для $Mac. Обновите окно перед повтором."
+    }
 }
 
 # ------------------------------------------------------------- вывод в текст ---
@@ -327,9 +330,6 @@ if ($Text) {
             Write-Host $script:Summary.WifiText -ForegroundColor Red
         } else {
             Write-Host $script:Summary.WifiText -ForegroundColor Green
-        }
-        if ($script:WhitelistFromRouter -gt 0) {
-            Write-Host '                    отметки списка прочитаны с роутера: whitelist.json ещё нет'
         }
         Write-Host ''
         Write-Host ('{0,-20} {1,-19} {2,-14} {3,-11} {4,-16} {5}' -f `
@@ -623,7 +623,7 @@ function Update-View {
             $btnWhitelist.Text = 'Включить'
             $tips.SetToolTip($btnWhitelist, 'Включить белый список Wi-Fi: к сети смогут подключиться только отмеченные устройства.')
         }
-        $btnWhitelist.Enabled = (Test-Path $WhitelistScript)
+        $btnWhitelist.Enabled = $script:Summary.WifiEditable -and (Test-Path $WhitelistScript)
 
         $grid.Rows.Clear()
         foreach ($r in $inventory) {
@@ -639,6 +639,7 @@ function Update-View {
                                 $r.Ip, $r.Blocked, $r.InWhitelist)
             $row = $grid.Rows[$i]
             $row.Tag = $r
+            $row.Cells[$COL_WHITE].ReadOnly = -not $script:Summary.WifiEditable
 
             if (-not $linkKnown -and $link -ne '—') {
                 $row.Cells[$COL_LINK].Style.ForeColor = [System.Drawing.Color]::Gray
@@ -675,11 +676,11 @@ function Update-View {
             if (-not $r.Online) { $row.Cells[$COL_STATE].Style.ForeColor = [System.Drawing.Color]::Gray }
         }
         $script:LastRefreshText = "Обновлено: $(Get-Date -Format 'HH:mm:ss') · устройств: $($inventory.Count)"
-        if ($script:WhitelistFromRouter -gt 0) {
-            $script:LastRefreshText += " · белый список прочитан с роутера, whitelist.json ещё нет"
-        }
+
     }
     catch {
+        $script:Summary = $null
+        $btnWhitelist.Enabled = $false
         $lblFirewall.Text = 'Межсетевой экран: неизвестно'
         $lblWifi.Text     = 'Белый список Wi-Fi: неизвестно'
         $lblWifi.ForeColor = [System.Drawing.Color]::Gray
@@ -750,6 +751,7 @@ function Test-GridState($Items) {
 }
 
 function Invoke-Apply {
+    if ($null -eq $script:Summary) { return }
     $items  = Get-GridState
     $errors = Test-GridState $items
     if ($errors.Count -gt 0) {
@@ -818,6 +820,17 @@ function Invoke-Apply {
     $btnRefresh.Enabled = $false
     $report = @()
     try {
+        Assert-FirewallState @($blockOn + $blockOff | ForEach-Object { $_.Row })
+        $wifiEdits = @(
+            foreach ($e in $wlOn)  { Get-WifiRowChanges $e.Row $e.Alias $true }
+            foreach ($e in $wlOff) { Get-WifiRowChanges $e.Row $e.Alias $false }
+        )
+        if ($wifiEdits.Count -gt 0) {
+            if (-not $script:Summary.WifiEditable) { throw 'Белый список сейчас недоступен для записи.' }
+            & $WhitelistScript patch -Changes $wifiEdits -Text -Router $Router -User $User
+            $report += 'Изменения белого списка проверены.'
+        }
+
         # devices.json — это реестр имён. В него попадают те, кто там уже
         # был, те, кого сейчас блокируют, и те, кому пользователь вписал имя
         # руками: раз имя набрано, его надо запомнить.
@@ -830,38 +843,19 @@ function Invoke-Apply {
         Save-DeviceAliases $aliasEntries
         $report += "devices.json: записей $($aliasEntries.Count)"
 
-        # Белый список.
-        if ($wlOn.Count -gt 0 -or $wlOff.Count -gt 0 -or $renamed.Count -gt 0) {
-            $wlEntries = @()
-            foreach ($e in $items) {
-                if (-not $e.White) { continue }
-                $wlEntries += [pscustomobject]@{ Alias = $e.Alias; Mac = $e.Row.Mac; Band = $e.Row.WlBand }
-            }
-            Save-Whitelist $wlEntries
-            $report += "whitelist.json: записей $($wlEntries.Count)"
-        }
-
         # Блокировки — через основной скрипт, чтобы правила писались
         # ровно одним способом.
         foreach ($e in $blockOn) {
+            Assert-FirewallState @($e.Row)
             & $MainScript block -Mac $e.Row.Mac -Router $Router -User $User | Out-Null
+            Confirm-FirewallChange $e.Row.Mac $true
             $report += "заблокировано: $($e.Alias)"
         }
         foreach ($e in $blockOff) {
+            Assert-FirewallState @($e.Row)
             & $MainScript unblock -Mac $e.Row.Mac -Router $Router -User $User | Out-Null
+            Confirm-FirewallChange $e.Row.Mac $false
             $report += "разблокировано: $($e.Alias)"
-        }
-
-        # Список на роутере приводим в соответствие с файлом: без этого
-        # снятая галочка правила бы файл, но не отзывала доступ.
-        if ($wlOn.Count -gt 0 -or $wlOff.Count -gt 0) {
-            if (Test-Path $WhitelistScript) {
-                $syncLog = & $WhitelistScript sync -Text -Router $Router -User $User 2>&1 | Out-String
-                $report += ''
-                $report += $syncLog.Trim()
-            } else {
-                $report += 'wifi-whitelist.ps1 рядом не найден — список на роутере не обновлён.'
-            }
         }
 
         [System.Windows.Forms.MessageBox]::Show(($report -join [Environment]::NewLine),
@@ -891,7 +885,7 @@ function Invoke-WhitelistToggle {
     <#  Включение и выключение белого списка Wi-Fi. Всю работу и все проверки
         делает wifi-whitelist.ps1: он же покажет, кто сохранит доступ, и
         откажется включать список, в котором нет адреса этого компьютера. #>
-    if ($null -eq $script:Summary) { return }
+    if ($null -eq $script:Summary -or -not $script:Summary.WifiEditable) { return }
 
     if ($script:Dirty) {
         [System.Windows.Forms.MessageBox]::Show(
@@ -903,18 +897,6 @@ function Invoke-WhitelistToggle {
 
     $action = 'on'
     if ($script:Summary.WifiOn) { $action = 'off' }
-
-    # Без файла wifi-whitelist.ps1 включать список откажется, а отметки в
-    # таблице сейчас взяты с роутера. Сохраняем то, что видно: это ровно
-    # то, что на роутере и есть, — правки заблокированы проверкой выше.
-    if ($action -eq 'on' -and -not (Test-Path $WhitelistFile)) {
-        $seed = @()
-        foreach ($e in (Get-GridState)) {
-            if (-not $e.White) { continue }
-            $seed += [pscustomobject]@{ Alias = $e.Alias; Mac = $e.Row.Mac; Band = $e.Row.WlBand }
-        }
-        Save-Whitelist $seed
-    }
 
     $form.Cursor          = 'WaitCursor'
     $btnWhitelist.Enabled = $false
@@ -942,7 +924,7 @@ function Invoke-ForgetDevice {
         Отличается от снятия галочек тем, что запись исчезает, а не гаснет.
         Нужно для адресов, которые уже не вернутся: устройство с
         рандомизацией MAC оставляет мёртвый адрес при каждой смене. #>
-    if (-not $script:MenuRow -or -not $script:MenuRow.Tag) { return }
+    if (-not $script:Summary -or -not $script:MenuRow -or -not $script:MenuRow.Tag) { return }
     $r = $script:MenuRow.Tag
 
     if ($script:Dirty) {
@@ -955,7 +937,7 @@ function Invoke-ForgetDevice {
 
     $where = @()
     if ($r.InDevices)   { $where += '  имя в devices.json' }
-    if ($r.InWhitelist) { $where += '  запись в белом списке — и в файле, и на роутере' }
+    if ($r.WifiRules.Count -gt 0) { $where += '  запись фильтра Wi-Fi на роутере' }
     if ($r.HasRule)     { $where += '  правило межсетевого экрана' }
 
     if ($where.Count -eq 0) {
@@ -982,36 +964,32 @@ function Invoke-ForgetDevice {
     $form.Cursor = 'WaitCursor'
     $report = @()
     try {
+        if ($r.HasRule) { Assert-FirewallState @($r) }
+        $wifiEdits = @(Get-WifiRowChanges $r $r.Alias $false)
+        if ($wifiEdits.Count -gt 0) {
+            & $WhitelistScript patch -Changes $wifiEdits -Text -Router $Router -User $User
+            $report += 'Удаление правил Wi-Fi подтверждено.'
+        }
         if ($r.HasRule) {
+            Assert-FirewallState @($r)
             & $MainScript remove -Mac $r.Mac -Router $Router -User $User | Out-Null
+            Confirm-FirewallChange $r.Mac $false -Removed
             $report += 'Правило межсетевого экрана удалено.'
         }
 
         # Файлы пересобираем из таблицы: правок в ней нет, значит она сейчас
         # в точности повторяет содержимое файлов.
         $aliases = @()
-        $white   = @()
         foreach ($row in $grid.Rows) {
             $x = $row.Tag
             if (-not $x -or $x.Mac -eq $r.Mac) { continue }
             if ($x.InDevices)   { $aliases += [pscustomobject]@{ Alias = $x.Alias; Mac = $x.Mac } }
-            if ($x.InWhitelist) { $white   += [pscustomobject]@{ Alias = $x.Alias; Mac = $x.Mac; Band = $x.WlBand } }
         }
 
         if ($r.InDevices) {
             Save-DeviceAliases $aliases
             $report += "devices.json: осталось записей $($aliases.Count)."
         }
-        if ($r.InWhitelist) {
-            Save-Whitelist $white
-            $report += "whitelist.json: осталось записей $($white.Count)."
-            if (Test-Path $WhitelistScript) {
-                $syncLog = & $WhitelistScript sync -Text -Router $Router -User $User 2>&1 | Out-String
-                $report += ''
-                $report += $syncLog.Trim()
-            }
-        }
-
         [System.Windows.Forms.MessageBox]::Show(($report -join [Environment]::NewLine),
             'Убрано', [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
